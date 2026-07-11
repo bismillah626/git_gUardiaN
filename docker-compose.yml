@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  codeguardian-api:
+    build: .
+    network_mode: "host" # Lets the container talk to your local Ollama daemon
+    volumes:
+      # This syncs your local folder with the container. 
+      # When you save a file in Neovim, it updates instantly in the container!
+      - .:/app 
+    environment:
+      # We will pass API keys here later
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}

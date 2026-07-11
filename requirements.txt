@@ -1,0 +1,34 @@
+# ==========================================
+# gitGuardian AI - Requirements
+# ==========================================
+
+# --- API & Webhook Receiver ---
+fastapi
+uvicorn
+PyGithub
+
+# --- Agent Orchestration & LLMs ---
+langgraph
+langchain-community
+langchain-ollama
+langchain-groq
+
+# --- Model Context Protocol (MCP) ---
+mcp[cli]==2.0.0b1
+langchain-mcp-adapters>=0.3.0
+
+# --- Retrieval-Augmented Generation (RAG) ---
+chromadb
+#sentence-transformers
+#Since you are running your LLM locally 
+#via Ollama on your bare-metal Arch Linux host, 
+#we can completely bypass installing PyTorch 
+#inside your Docker container. Ollama has a built-in embeddings API! 
+#We can offload the heavy math to your bare metal and make your Docker container incredibly lightweight.
+
+# --- Python-Based Static Security Analysis ---
+bandit
+semgrep
+
+# --- Frontend Dashboard (MVP) ---
+streamlit
