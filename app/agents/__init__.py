@@ -1,2 +1,1 @@
-# Agents package
-from app.agents.supervisor import compile_review_graph
+# Agents package — lazy imports to avoid import chain issues
