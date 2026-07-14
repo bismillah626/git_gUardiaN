@@ -1,30 +1,36 @@
 # ==========================================
-# gitGuardian AI - Requirements
+# CodeGuardian AI - Requirements
 # ==========================================
 
 # --- API & Webhook Receiver ---
 fastapi
-uvicorn
+uvicorn[standard]
 PyGithub
+python-dotenv
+pydantic>=2.0
+pydantic-settings>=2.0
+httpx
 
 # --- Agent Orchestration & LLMs ---
-langgraph
-langchain-community
-langchain-ollama
-langchain-groq
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-groq>=0.2.0
 
 # --- Model Context Protocol (MCP) ---
-mcp[cli]==2.0.0b1
-langchain-mcp-adapters>=0.3.0
+# mcp[cli]==2.0.0b1
+# langchain-mcp-adapters>=0.3.0
+# NOTE: MCP adapters pinned but may conflict; agents call tools directly for now
 
 # --- Retrieval-Augmented Generation (RAG) ---
-chromadb
-#sentence-transformers
-#Since you are running your LLM locally 
-#via Ollama on your bare-metal Arch Linux host, 
-#we can completely bypass installing PyTorch 
-#inside your Docker container. Ollama has a built-in embeddings API! 
-#We can offload the heavy math to your bare metal and make your Docker container incredibly lightweight.
+chromadb>=0.5.0
+
+# --- Database ---
+sqlalchemy>=2.0
+asyncpg
+psycopg2-binary
+alembic
 
 # --- Python-Based Static Security Analysis ---
 bandit
@@ -32,3 +38,7 @@ semgrep
 
 # --- Frontend Dashboard (MVP) ---
 streamlit
+plotly
+
+# --- Utilities ---
+tenacity
