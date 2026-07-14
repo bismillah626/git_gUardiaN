@@ -1,14 +1,54 @@
 version: '3.8'
 
 services:
+  # ─── PostgreSQL Database ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: codeguardian
+      POSTGRES_PASSWORD: codeguardian
+      POSTGRES_DB: codeguardian
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codeguardian"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── CodeGuardian API ─────────────────────────────────────────────
   codeguardian-api:
     build: .
-    network_mode: "host" # Lets the container talk to your local Ollama daemon
+    network_mode: "host"
     volumes:
-      # This syncs your local folder with the container. 
-      # When you save a file in Neovim, it updates instantly in the container!
-      - .:/app 
+      - .:/app
+      - chroma_data:/app/chroma_data
     environment:
-      # We will pass API keys here later
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
+      - DATABASE_URL=postgresql+psycopg2://codeguardian:codeguardian@localhost:5432/codeguardian
+      - DATABASE_URL_ASYNC=postgresql+asyncpg://codeguardian:codeguardian@localhost:5432/codeguardian
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── Streamlit Dashboard ──────────────────────────────────────────
+  dashboard:
+    build: .
+    network_mode: "host"
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg2://codeguardian:codeguardian@localhost:5432/codeguardian
+    command: ["streamlit", "run", "app/dashboard/app.py", "--server.port", "8501", "--server.headless", "true"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  chroma_data:
