@@ -220,14 +220,16 @@ async def run_review_pipeline(payload: PRWebhookPayload):
         changed_files = gh.get_pr_files(payload.repo_full_name, payload.pr_number)
         logger.info(f"PR has {len(changed_files)} changed files")
         
-        # Get head SHA if not provided (manual trigger)
+        # Get head SHA and branch if not provided (manual trigger)
         head_sha = payload.head_sha
+        head_branch = payload.head_branch
         if not head_sha:
             pr = gh.get_pr(payload.repo_full_name, payload.pr_number)
             head_sha = pr.head.sha
+            head_branch = pr.head.ref
         
-        # Clone repo for security scanning
-        repo_clone_path = _clone_repo(payload.repo_full_name, head_sha)
+        # Clone repo for security scanning (must clone the PR's branch)
+        repo_clone_path = _clone_repo(payload.repo_full_name, head_sha, head_branch)
         
         # Build the LangGraph review state
         initial_state = {
@@ -297,8 +299,12 @@ def _verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def _clone_repo(repo_full_name: str, sha: str) -> str:
-    """Clone a repo to a temporary directory for scanning."""
+def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
+    """Clone a repo to a temporary directory for scanning.
+    
+    Clones the specific branch (if provided) so PR files are available.
+    Falls back to default branch + SHA checkout if branch is not specified.
+    """
     clone_dir = tempfile.mkdtemp(prefix="codeguardian_")
     
     # Use token for private repos
@@ -308,19 +314,18 @@ def _clone_repo(repo_full_name: str, sha: str) -> str:
         clone_url = f"https://github.com/{repo_full_name}.git"
     
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", clone_url, clone_dir],
+        # Clone the specific branch if available (critical for PR file access)
+        clone_cmd = ["git", "clone", "--depth", "1"]
+        if branch:
+            clone_cmd.extend(["--branch", branch])
+        clone_cmd.extend([clone_url, clone_dir])
+        
+        result = subprocess.run(
+            clone_cmd,
             capture_output=True, text=True, timeout=120,
             check=True,
         )
-        
-        # Checkout specific SHA if needed
-        if sha:
-            subprocess.run(
-                ["git", "checkout", sha],
-                cwd=clone_dir,
-                capture_output=True, text=True, timeout=30,
-            )
+        logger.info(f"Cloned {repo_full_name} (branch={branch or 'default'}) to {clone_dir}")
         
         return clone_dir
     except Exception as e:
