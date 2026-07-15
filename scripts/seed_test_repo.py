@@ -1,5 +1,5 @@
 """
-Seed script: creates intentionally buggy files for testing CodeGuardian.
+Seed script: creates intentionally buggy files for testing Git Guardian.
 
 Run this to populate a test repo with known vulnerabilities, quality issues,
 missing tests, and documentation gaps so the review pipeline can be validated.
@@ -8,7 +8,7 @@ missing tests, and documentation gaps so the review pipeline can be validated.
 import os
 
 BUGGY_FILES = {
-    "vulnerable_app.py": '''"""A deliberately insecure Python application for testing CodeGuardian."""
+    "vulnerable_app.py": '''"""A deliberately insecure Python application for testing Git Guardian."""
 
 import subprocess
 import sqlite3

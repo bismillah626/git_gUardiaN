@@ -1,5 +1,5 @@
 """
-Tests for CodeGuardian AI core utilities.
+Tests for Git Guardian AI core utilities.
 """
 
 import pytest

@@ -1,5 +1,5 @@
 """
-Security tools runner for CodeGuardian AI.
+Security tools runner for Git Guardian AI.
 
 Runs Bandit, Semgrep, and Gitleaks on target code and returns structured JSON output.
 This module is used by the Security Agent (and exposed via the MCP security server).

@@ -1,4 +1,4 @@
-# 🛡️ CodeGuardian AI
+# 🛡️ Git Guardian AI
 
 **A team of cooperating AI agents that reviews every pull request like a senior engineer** — checking code quality, security vulnerabilities, missing tests, and documentation — then posts a single, prioritized report and can optionally open an auto-fix PR behind a human-approval gate.
 
@@ -9,11 +9,11 @@
 
 ---
 
-## 🧠 Why CodeGuardian?
+## 🧠 Why Git Guardian?
 
 Manual code review doesn't scale. Security flaws — SQL injection, hardcoded secrets, insecure dependencies — slip through, and small teams can't afford a dedicated AppSec engineer. Traditional linters catch syntax issues but can't reason about intent, business logic, or cross-file risk.
 
-CodeGuardian solves this with:
+Git Guardian solves this with:
 
 - **True multi-agent architecture** (supervisor + 4 specialists), not a single chatbot wrapper
 - **Deterministic static analysis + LLM reasoning** — the LLM triages and explains tool findings, it never invents issues from scratch
@@ -146,7 +146,7 @@ The LLM **never invents findings from scratch**. Every security finding must tra
 - Graceful degradation (raw tool output if LLM triage fails)
 
 ### Auto-Fix Safety
-- Fix commits always go to a **separate branch** (`codeguardian/auto-fix/<PR>`)
+- Fix commits always go to a **separate branch** (`git_guardian/auto-fix/<PR>`)
 - **Never auto-merges** — requires explicit human approval
 - Fix PR clearly labeled with what was changed and why
 

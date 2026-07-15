@@ -1,5 +1,5 @@
 """
-Test-Gap Agent for CodeGuardian AI.
+Test-Gap Agent for Git Guardian AI.
 
 Identifies untested functions/branches in the changed code
 and drafts starter unit tests.

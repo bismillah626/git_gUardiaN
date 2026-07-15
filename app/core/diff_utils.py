@@ -1,5 +1,5 @@
 """
-Diff parsing and chunking utilities for CodeGuardian AI.
+Diff parsing and chunking utilities for Git Guardian AI.
 
 Key constraint: Only send changed lines + minimal surrounding context to the LLM,
 never full files. Chunk large diffs to stay within token budgets.

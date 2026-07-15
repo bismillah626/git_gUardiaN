@@ -1,5 +1,5 @@
 """
-Documentation Agent for CodeGuardian AI.
+Documentation Agent for Git Guardian AI.
 
 Flags missing/outdated docstrings and drafts replacements.
 """

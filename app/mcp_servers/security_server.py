@@ -1,5 +1,5 @@
 """
-MCP Security Server for CodeGuardian AI.
+MCP Security Server for Git Guardian AI.
 
 Exposes Semgrep, Bandit, Gitleaks, and ESLint as MCP-compatible tools
 with structured JSON output. This server can be consumed by LangChain

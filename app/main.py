@@ -1,5 +1,5 @@
 """
-CodeGuardian AI — FastAPI Entrypoint.
+Git Guardian AI — FastAPI Entrypoint.
 
 Webhook receiver for GitHub PR events. Validates signatures,
 parses payloads, and triggers the LangGraph review pipeline.
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle events."""
-    logger.info("🚀 CodeGuardian AI starting up...")
+    logger.info("🚀 Git Guardian AI starting up...")
     
     # Initialize database tables
     try:
@@ -70,13 +70,13 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    logger.info("👋 CodeGuardian AI shutting down")
+    logger.info("👋 Git Guardian AI shutting down")
 
 
 # ─── FastAPI App ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="CodeGuardian AI",
+    title="Git Guardian AI",
     description="Multi-Agent AI Code Review & DevSecOps Platform",
     version="1.0.0",
     lifespan=lifespan,
@@ -88,7 +88,7 @@ app = FastAPI(
 @app.get("/")
 async def root():
     return {
-        "name": "CodeGuardian AI",
+        "name": "Git Guardian AI",
         "status": "running",
         "version": "1.0.0",
         "description": "Multi-Agent AI Code Review & DevSecOps Platform",
@@ -204,7 +204,7 @@ async def manual_review(
 # ─── Review Pipeline ──────────────────────────────────────────────────────────
 
 async def run_review_pipeline(payload: PRWebhookPayload):
-    """Execute the full CodeGuardian review pipeline.
+    """Execute the full Git Guardian review pipeline.
     
     1. Fetch PR diff/files from GitHub
     2. Clone repo to temp dir (for security scanning)
@@ -279,7 +279,7 @@ async def run_review_pipeline(payload: PRWebhookPayload):
             gh.post_pr_comment(
                 payload.repo_full_name,
                 payload.pr_number,
-                f"⚠️ **CodeGuardian AI** encountered an error during review:\n\n```\n{str(e)}\n```",
+                f"⚠️ **Git Guardian AI** encountered an error during review:\n\n```\n{str(e)}\n```",
             )
         except Exception:
             pass
@@ -305,7 +305,7 @@ def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
     Clones the specific branch (if provided) so PR files are available.
     Falls back to default branch + SHA checkout if branch is not specified.
     """
-    clone_dir = tempfile.mkdtemp(prefix="codeguardian_")
+    clone_dir = tempfile.mkdtemp(prefix="git_guardian_")
     
     # Use token for private repos
     if settings.github_token:

@@ -1,5 +1,5 @@
 """
-CodeGuardian AI — Streamlit Dashboard.
+Git Guardian AI — Streamlit Dashboard.
 
 Displays historical review data from Postgres:
 - Review history with severity breakdown
@@ -25,7 +25,7 @@ from app.core.database import get_all_reviews, get_reviews_by_repo, init_db, Ses
 # ─── Page Config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="CodeGuardian AI Dashboard",
+    page_title="Git Guardian AI Dashboard",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -61,7 +61,7 @@ st.markdown("""
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-st.sidebar.markdown("# 🛡️ CodeGuardian AI")
+st.sidebar.markdown("# 🛡️ Git Guardian AI")
 st.sidebar.markdown("### Multi-Agent Code Review Platform")
 st.sidebar.markdown("---")
 
@@ -100,7 +100,7 @@ st.sidebar.markdown(f"**Repos Tracked:** {len(repos)}")
 
 # ─── Main Content ─────────────────────────────────────────────────────────────
 
-st.markdown('<p class="main-header">🛡️ CodeGuardian AI Dashboard</p>', unsafe_allow_html=True)
+st.markdown('<p class="main-header">🛡️ Git Guardian AI Dashboard</p>', unsafe_allow_html=True)
 st.markdown("*Multi-Agent Code Review & DevSecOps Platform*")
 st.markdown("---")
 
@@ -109,7 +109,7 @@ if not reviews:
         "👋 **No reviews yet!** Trigger a PR review to see data here.\n\n"
         "1. Set up the webhook on your GitHub repo pointing to `/webhook/github`\n"
         "2. Open a Pull Request\n"
-        "3. Watch CodeGuardian analyze it automatically!"
+        "3. Watch Git Guardian analyze it automatically!"
     )
     st.stop()
 
@@ -320,6 +320,6 @@ for r in reviews[:20]:
 
 st.markdown("---")
 st.markdown(
-    "*🛡️ CodeGuardian AI — Multi-Agent Code Review & DevSecOps Platform | "
+    "*🛡️ Git Guardian AI — Multi-Agent Code Review & DevSecOps Platform | "
     "Powered by LangGraph, Groq, ChromaDB*"
 )

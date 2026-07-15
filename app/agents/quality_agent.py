@@ -1,5 +1,5 @@
 """
-Quality Agent for CodeGuardian AI.
+Quality Agent for Git Guardian AI.
 
 Checks code style, complexity, duplicate logic, and naming conventions.
 Grounds all feedback via RAG over the team's coding-standards document,

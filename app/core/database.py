@@ -1,5 +1,5 @@
 """
-Database engine, session, and table definitions for CodeGuardian AI.
+Database engine, session, and table definitions for Git Guardian AI.
 
 Uses SQLAlchemy 2.0 style with psycopg2 (sync) for Streamlit dashboard
 and general operations.

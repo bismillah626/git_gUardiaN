@@ -1,5 +1,5 @@
 """
-LLM Provider adapter for CodeGuardian AI.
+LLM Provider adapter for Git Guardian AI.
 
 Provides a unified interface for calling Groq (primary) and Claude (fallback)
 with built-in retry/backoff for rate-limit resilience.

@@ -1,5 +1,5 @@
 """
-Pydantic schemas for CodeGuardian AI.
+Pydantic schemas for Git Guardian AI.
 
 These models define the data contracts between agents, the API, and the database.
 """

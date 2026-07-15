@@ -1,5 +1,5 @@
 """
-Security Agent for CodeGuardian AI.
+Security Agent for Git Guardian AI.
 
 Runs Semgrep/Bandit/Gitleaks on changed files, then uses the LLM
 ONLY to triage and explain findings — never to invent new ones.
@@ -181,6 +181,14 @@ async def run_security_agent(
             f"Skipped: [{', '.join(tools_skipped)}]. "
             f"Total raw findings: {len(all_tool_findings)}"
         )
+
+        # ── Normalize file paths: strip temp dir prefix ─────────────────
+        # Tools report absolute paths like /tmp/tmpXXX/services/admin_tools.py
+        # We need to normalize to relative paths like services/admin_tools.py
+        for finding in all_tool_findings:
+            fpath = finding.get("file", "")
+            if tmpdir and fpath.startswith(tmpdir):
+                finding["file"] = fpath[len(tmpdir):].lstrip("/")
 
         if not all_tool_findings:
             return AgentResult(

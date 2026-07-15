@@ -1,5 +1,5 @@
 # ==========================================
-# CodeGuardian AI - Requirements
+# Git Guardian AI - Requirements
 # ==========================================
 
 # --- API & Webhook Receiver ---

@@ -1,5 +1,5 @@
 """
-GitHub API integration for CodeGuardian AI.
+GitHub API integration for Git Guardian AI.
 
 Handles: authentication, fetching PR diffs, posting comments,
 creating branches, and committing auto-fix files.

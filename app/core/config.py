@@ -1,5 +1,5 @@
 """
-CodeGuardian AI — Central configuration.
+Git Guardian AI — Central configuration.
 
 All settings are loaded from environment variables (or a .env file via pydantic-settings).
 """
@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """Application-wide settings sourced from environment variables."""
 
     # --- App ---
-    app_name: str = "CodeGuardian AI"
+    app_name: str = "Git Guardian AI"
     debug: bool = False
 
     # --- GitHub ---
@@ -30,11 +30,11 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str = Field(
-        default="postgresql+psycopg2://codeguardian:codeguardian@localhost:5432/codeguardian",
+        default="postgresql+psycopg2://git_guardian:git_guardian@localhost:5432/git_guardian",
         description="Postgres connection string",
     )
     database_url_async: str = Field(
-        default="postgresql+asyncpg://codeguardian:codeguardian@localhost:5432/codeguardian",
+        default="postgresql+asyncpg://git_guardian:git_guardian@localhost:5432/git_guardian",
         description="Async Postgres connection string",
     )
 
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
 
     # --- Security ---
     max_diff_lines: int = 500  # Max lines sent to LLM per chunk
-    auto_fix_branch_prefix: str = "codeguardian/auto-fix/"
+    auto_fix_branch_prefix: str = "git_guardian/auto-fix/"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

@@ -1,5 +1,5 @@
 """
-RAG (Retrieval-Augmented Generation) service for CodeGuardian AI.
+RAG (Retrieval-Augmented Generation) service for Git Guardian AI.
 
 Indexes the repo's code + coding-standards document into ChromaDB.
 Uses Groq-based embeddings (via the LLM to generate pseudo-embeddings)
@@ -21,9 +21,9 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Default coding standards document that ships with CodeGuardian
+# Default coding standards document that ships with Git Guardian
 DEFAULT_CODING_STANDARDS = """
-# CodeGuardian Default Coding Standards
+# Git Guardian Default Coding Standards
 
 ## Python Standards
 1. **PEP 8 Compliance**: All Python code must follow PEP 8 style guidelines.
