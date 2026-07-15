@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     )
 
     # --- ChromaDB ---
-    chroma_persist_dir: str = Field(default="/app/chroma_data", description="ChromaDB persistence directory")
+    chroma_persist_dir: str = Field(default="./chroma_data", description="ChromaDB persistence directory")
 
     # --- Rate Limiting ---
     groq_max_retries: int = 5

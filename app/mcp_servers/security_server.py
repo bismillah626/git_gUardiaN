@@ -20,6 +20,7 @@ from app.services.security_tools import (
     run_gitleaks,
     run_eslint,
     run_all_security_tools,
+    check_tool_availability,
 )
 
 logger = logging.getLogger(__name__)

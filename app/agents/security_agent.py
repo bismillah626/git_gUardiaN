@@ -31,6 +31,13 @@ Your job is to:
 3. Assign a severity: critical, high, medium, low, or info.
 4. Suggest a fix if possible.
 
+SEVERITY RULES (you must follow these minimums):
+- Hardcoded credentials, API keys, passwords, tokens → CRITICAL (minimum)
+- eval(), exec(), os.system() with unsanitized input → HIGH (minimum)
+- SQL injection patterns (string concatenation in queries) → HIGH (minimum)
+- Command injection patterns → HIGH (minimum)
+- Only downgrade from these minimums if you can prove it's a false positive (mark as "info")
+
 CRITICAL RULES:
 - You must ONLY triage the findings given to you. Do NOT invent new findings.
 - Every finding in your response must reference the original tool and rule_id.
@@ -50,6 +57,43 @@ Respond in JSON format as a list of objects:
 ]
 """
 
+# ── Severity floor rules ──────────────────────────────────────────────────────
+# These enforce minimum severity for certain categories of findings,
+# preventing the LLM from under-ranking dangerous patterns.
+
+# Gitleaks rule IDs that indicate credential/secret exposure → CRITICAL floor
+_CREDENTIAL_RULE_IDS = {
+    "generic-api-key", "private-key", "aws-access-key-id", "aws-secret-access-key",
+    "github-pat", "github-oauth", "slack-token", "stripe-api-key",
+    "google-api-key", "heroku-api-key", "mailchimp-api-key",
+    "twilio-api-key", "sendgrid-api-key", "npm-access-token",
+    "pypi-upload-token", "telegram-bot-api-token", "discord-client-secret",
+    "jwt", "password-in-url",
+}
+
+# Bandit test IDs for dangerous patterns → HIGH floor
+_DANGEROUS_BANDIT_IDS = {
+    "B102",  # exec_used
+    "B307",  # eval
+    "B301",  # pickle
+    "B602",  # subprocess_popen_with_shell_equals_true
+    "B603",  # subprocess_without_shell_equals_true (command injection)
+    "B604",  # any_other_function_with_shell_equals_true
+    "B605",  # start_process_with_a_shell
+    "B606",  # start_process_with_no_shell
+    "B607",  # start_process_with_partial_path
+    "B608",  # hardcoded_sql_expressions
+    "B609",  # wildcard_injection
+    "B610",  # django_extra_used
+    "B611",  # django_rawsql_used
+    "B105",  # hardcoded_password_string
+    "B106",  # hardcoded_password_funcarg
+    "B107",  # hardcoded_password_default
+}
+
+# Keywords in messages that indicate credential exposure
+_CREDENTIAL_KEYWORDS = {"password", "secret", "api_key", "api-key", "apikey", "token", "credential"}
+
 
 async def run_security_agent(
     changed_files: List[Dict],
@@ -60,13 +104,18 @@ async def run_security_agent(
     1. Run static analysis tools on changed files
     2. Send raw findings to LLM for triage/explanation (batched per file)
     3. Validate that every returned finding traces to a tool output
-    4. Return standardized AgentResult
+    4. Enforce severity floors for dangerous patterns
+    5. Return standardized AgentResult
     """
     start_time = time.time()
     all_tool_findings: List[Dict] = []
+    tools_executed: List[str] = []
+    tools_skipped: List[str] = []
 
     try:
         # ── Step 1: Run security tools on changed files ─────────────────
+        logger.info(f"[SECURITY-AGENT] Starting security scan on {len(changed_files)} changed files")
+        
         with tempfile.TemporaryDirectory() as tmpdir:
             python_files_exist = False
             js_files_exist = False
@@ -95,29 +144,49 @@ async def run_security_agent(
 
             # Run appropriate tools
             if python_files_exist:
+                logger.info("[SECURITY-AGENT] Python files detected — running Bandit + Semgrep")
                 bandit_results = run_bandit(tmpdir)
                 all_tool_findings.extend(bandit_results)
+                tools_executed.append(f"bandit({len(bandit_results)} findings)")
 
                 semgrep_results = run_semgrep(tmpdir)
                 all_tool_findings.extend(semgrep_results)
+                tools_executed.append(f"semgrep({len(semgrep_results)} findings)")
+            else:
+                tools_skipped.extend(["bandit (no .py files)", "semgrep (no .py files)"])
 
+            logger.info("[SECURITY-AGENT] Running Gitleaks on all changed files")
             gitleaks_results = run_gitleaks(tmpdir)
             all_tool_findings.extend(gitleaks_results)
+            tools_executed.append(f"gitleaks({len(gitleaks_results)} findings)")
 
             if js_files_exist:
                 # Run ESLint on each JS/TS file
+                eslint_count = 0
                 for file_info in changed_files:
                     fn = file_info.get("filename", "")
                     if fn.endswith((".js", ".jsx", ".ts", ".tsx")):
                         fp = os.path.join(tmpdir, fn)
                         if os.path.exists(fp):
-                            all_tool_findings.extend(run_eslint(fp))
+                            eslint_results = run_eslint(fp)
+                            all_tool_findings.extend(eslint_results)
+                            eslint_count += len(eslint_results)
+                tools_executed.append(f"eslint({eslint_count} findings)")
+            else:
+                tools_skipped.append("eslint (no JS/TS files)")
+
+        logger.info(
+            f"[SECURITY-AGENT] Tool execution complete. "
+            f"Ran: [{', '.join(tools_executed)}]. "
+            f"Skipped: [{', '.join(tools_skipped)}]. "
+            f"Total raw findings: {len(all_tool_findings)}"
+        )
 
         if not all_tool_findings:
             return AgentResult(
                 agent_name="security",
                 findings=[],
-                summary="No security issues found in changed files.",
+                summary=f"No security issues found. Tools executed: {', '.join(tools_executed)}.",
                 execution_time_seconds=time.time() - start_time,
             )
 
@@ -164,17 +233,22 @@ async def run_security_agent(
         # ── Step 3: Validate — reject any finding without tool source ───
         validated = _validate_findings(triaged_findings, all_tool_findings)
 
+        # ── Step 4: Enforce severity floors ─────────────────────────────
+        enforced = _enforce_severity_floors(validated)
+
         elapsed = time.time() - start_time
         summary = (
-            f"Security scan complete: {len(validated)} findings "
-            f"({sum(1 for f in validated if f.severity == Severity.CRITICAL)} critical, "
-            f"{sum(1 for f in validated if f.severity == Severity.HIGH)} high) "
-            f"in {elapsed:.1f}s"
+            f"Security scan complete: {len(enforced)} findings "
+            f"({sum(1 for f in enforced if f.severity == Severity.CRITICAL)} critical, "
+            f"{sum(1 for f in enforced if f.severity == Severity.HIGH)} high) "
+            f"in {elapsed:.1f}s. Tools: {', '.join(tools_executed)}"
         )
+
+        logger.info(f"[SECURITY-AGENT] {summary}")
 
         return AgentResult(
             agent_name="security",
-            findings=validated,
+            findings=enforced,
             summary=summary,
             execution_time_seconds=elapsed,
         )
@@ -276,11 +350,69 @@ def _validate_findings(
             validated.append(finding)
         else:
             logger.warning(
-                f"Rejected hallucinated finding: {finding.source_tool}/{finding.rule_id} "
+                f"[SECURITY-AGENT] Rejected hallucinated finding: {finding.source_tool}/{finding.rule_id} "
                 f"in {finding.file} — no matching tool output"
             )
 
     return validated
+
+
+def _enforce_severity_floors(findings: List[Finding]) -> List[Finding]:
+    """Enforce minimum severity levels for dangerous pattern categories.
+    
+    Prevents the LLM from under-ranking critical security issues.
+    - Credential/secret exposure (gitleaks) → CRITICAL minimum
+    - Dangerous function usage (eval, exec, os.system) → HIGH minimum
+    - SQL injection patterns → HIGH minimum
+    - Hardcoded passwords (bandit B105/B106/B107) → HIGH minimum
+    """
+    severity_rank = {
+        Severity.CRITICAL: 0,
+        Severity.HIGH: 1,
+        Severity.MEDIUM: 2,
+        Severity.LOW: 3,
+        Severity.INFO: 4,
+    }
+    
+    enforced = []
+    for finding in findings:
+        original_severity = finding.severity
+        floor = None
+        
+        # Rule 1: Gitleaks findings (secrets) → CRITICAL floor
+        if finding.source_tool == "gitleaks":
+            floor = Severity.CRITICAL
+        
+        # Rule 2: Known credential-related rule IDs → CRITICAL floor
+        if finding.rule_id and finding.rule_id.lower() in _CREDENTIAL_RULE_IDS:
+            floor = Severity.CRITICAL
+        
+        # Rule 3: Credential keywords in message → HIGH floor (minimum)
+        if any(kw in (finding.message or "").lower() for kw in _CREDENTIAL_KEYWORDS):
+            if floor is None or severity_rank.get(floor, 99) > severity_rank[Severity.HIGH]:
+                floor = Severity.HIGH
+        
+        # Rule 4: Dangerous Bandit rule IDs → HIGH floor
+        if finding.rule_id and finding.rule_id.upper() in _DANGEROUS_BANDIT_IDS:
+            if floor is None or severity_rank.get(floor, 99) > severity_rank[Severity.HIGH]:
+                floor = Severity.HIGH
+        
+        # Rule 5: Hardcoded password bandit rules → CRITICAL floor
+        if finding.rule_id and finding.rule_id.upper() in {"B105", "B106", "B107"}:
+            floor = Severity.CRITICAL
+        
+        # Apply the floor (only escalate, never downgrade)
+        if floor is not None:
+            if severity_rank.get(finding.severity, 99) > severity_rank[floor]:
+                finding = finding.model_copy(update={"severity": floor})
+                logger.info(
+                    f"[SECURITY-AGENT] Severity escalated: {finding.source_tool}/{finding.rule_id} "
+                    f"{original_severity.value} → {floor.value}"
+                )
+        
+        enforced.append(finding)
+    
+    return enforced
 
 
 def _map_severity(sev_str: str) -> Severity:

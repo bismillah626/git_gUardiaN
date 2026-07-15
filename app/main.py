@@ -25,6 +25,7 @@ from app.core.github_client import GitHubClient
 from app.models.schemas import PRWebhookPayload, Severity
 from app.agents.supervisor import compile_review_graph
 from app.services.rag_service import rag_service
+from app.services.security_tools import check_tool_availability
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 
@@ -55,6 +56,17 @@ async def lifespan(app: FastAPI):
         logger.info(f"✅ Indexed {count} coding standard sections into ChromaDB")
     except Exception as e:
         logger.warning(f"⚠️ RAG indexing failed: {e}")
+    
+    # Check security tool availability
+    try:
+        tools = check_tool_availability()
+        missing = [name for name, available in tools.items() if not available]
+        if missing:
+            logger.warning(f"⚠️ Missing security tools: {', '.join(missing)} — security scans will be incomplete")
+        else:
+            logger.info("✅ All security tools available")
+    except Exception as e:
+        logger.warning(f"⚠️ Tool availability check failed: {e}")
     
     yield
     

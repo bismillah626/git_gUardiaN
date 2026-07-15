@@ -11,11 +11,30 @@ actual tool output from this module.
 import json
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def check_tool_availability() -> Dict[str, bool]:
+    """Check which security tools are available on PATH.
+    
+    Call this at startup to log tool availability diagnostics.
+    """
+    tools = {
+        "bandit": shutil.which("bandit") is not None,
+        "semgrep": shutil.which("semgrep") is not None,
+        "gitleaks": shutil.which("gitleaks") is not None,
+        "eslint": shutil.which("eslint") is not None,
+    }
+    for name, available in tools.items():
+        status = "✅ AVAILABLE" if available else "❌ NOT FOUND"
+        path = shutil.which(name) or "N/A"
+        logger.info(f"[SECURITY-TOOLS] {name}: {status} (path: {path})")
+    return tools
 
 
 def run_bandit(target_path: str) -> List[Dict]:
@@ -33,6 +52,7 @@ def run_bandit(target_path: str) -> List[Dict]:
             "code": str,
         }
     """
+    logger.info(f"[SECURITY-TOOLS] 🔍 BANDIT EXECUTION STARTED on: {target_path}")
     try:
         result = subprocess.run(
             [
@@ -48,8 +68,12 @@ def run_bandit(target_path: str) -> List[Dict]:
         )
         
         # Bandit returns exit code 1 when findings exist (not an error)
+        if result.stderr:
+            logger.warning(f"[SECURITY-TOOLS] Bandit stderr: {result.stderr[:500]}")
+        
         output = result.stdout
         if not output:
+            logger.info("[SECURITY-TOOLS] ✅ BANDIT COMPLETED — no findings")
             return []
         
         data = json.loads(output)
@@ -67,20 +91,20 @@ def run_bandit(target_path: str) -> List[Dict]:
                 "code": issue.get("code", ""),
             })
         
-        logger.info(f"Bandit found {len(findings)} issues in {target_path}")
+        logger.info(f"[SECURITY-TOOLS] ✅ BANDIT COMPLETED — {len(findings)} findings")
         return findings
         
     except FileNotFoundError:
-        logger.error("Bandit not installed. Install with: pip install bandit")
+        logger.error("[SECURITY-TOOLS] ❌ BANDIT NOT INSTALLED — pip install bandit")
         return []
     except subprocess.TimeoutExpired:
-        logger.error("Bandit timed out")
+        logger.error("[SECURITY-TOOLS] ❌ BANDIT TIMED OUT")
         return []
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Bandit output: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ BANDIT JSON PARSE FAILED: {e}")
         return []
     except Exception as e:
-        logger.error(f"Bandit error: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ BANDIT ERROR: {e}")
         return []
 
 
@@ -89,6 +113,7 @@ def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
     
     Returns list of findings in standardized format.
     """
+    logger.info(f"[SECURITY-TOOLS] 🔍 SEMGREP EXECUTION STARTED on: {target_path} (rules={rules})")
     try:
         cmd = [
             "semgrep",
@@ -105,8 +130,12 @@ def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
             timeout=180,
         )
         
+        if result.stderr:
+            logger.warning(f"[SECURITY-TOOLS] Semgrep stderr: {result.stderr[:500]}")
+        
         output = result.stdout
         if not output:
+            logger.info("[SECURITY-TOOLS] ✅ SEMGREP COMPLETED — no findings")
             return []
         
         data = json.loads(output)
@@ -131,20 +160,20 @@ def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
                 "code": match.get("extra", {}).get("lines", ""),
             })
         
-        logger.info(f"Semgrep found {len(findings)} issues in {target_path}")
+        logger.info(f"[SECURITY-TOOLS] ✅ SEMGREP COMPLETED — {len(findings)} findings")
         return findings
         
     except FileNotFoundError:
-        logger.error("Semgrep not installed. Install with: pip install semgrep")
+        logger.error("[SECURITY-TOOLS] ❌ SEMGREP NOT INSTALLED — pip install semgrep")
         return []
     except subprocess.TimeoutExpired:
-        logger.error("Semgrep timed out")
+        logger.error("[SECURITY-TOOLS] ❌ SEMGREP TIMED OUT")
         return []
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Semgrep output: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ SEMGREP JSON PARSE FAILED: {e}")
         return []
     except Exception as e:
-        logger.error(f"Semgrep error: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ SEMGREP ERROR: {e}")
         return []
 
 
@@ -153,6 +182,7 @@ def run_gitleaks(target_path: str) -> List[Dict]:
     
     Falls back gracefully if Gitleaks is not installed.
     """
+    logger.info(f"[SECURITY-TOOLS] 🔍 GITLEAKS EXECUTION STARTED on: {target_path}")
     try:
         result = subprocess.run(
             [
@@ -168,12 +198,17 @@ def run_gitleaks(target_path: str) -> List[Dict]:
             timeout=120,
         )
         
+        if result.stderr:
+            logger.info(f"[SECURITY-TOOLS] Gitleaks stderr: {result.stderr[:500]}")
+        
         output = result.stdout
         if not output or output.strip() == "null":
+            logger.info("[SECURITY-TOOLS] ✅ GITLEAKS COMPLETED — no secrets found")
             return []
         
         data = json.loads(output)
         if not isinstance(data, list):
+            logger.info("[SECURITY-TOOLS] ✅ GITLEAKS COMPLETED — no secrets found")
             return []
         
         findings = []
@@ -188,17 +223,17 @@ def run_gitleaks(target_path: str) -> List[Dict]:
                 "code": leak.get("Match", "")[:200],  # Truncate to avoid exposing full secret
             })
         
-        logger.info(f"Gitleaks found {len(findings)} potential secrets in {target_path}")
+        logger.info(f"[SECURITY-TOOLS] ✅ GITLEAKS COMPLETED — {len(findings)} secrets detected")
         return findings
         
     except FileNotFoundError:
-        logger.warning("Gitleaks not installed — skipping secret detection")
+        logger.error("[SECURITY-TOOLS] ❌ GITLEAKS NOT INSTALLED — skipping secret detection")
         return []
     except subprocess.TimeoutExpired:
-        logger.error("Gitleaks timed out")
+        logger.error("[SECURITY-TOOLS] ❌ GITLEAKS TIMED OUT")
         return []
     except Exception as e:
-        logger.error(f"Gitleaks error: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ GITLEAKS ERROR: {e}")
         return []
 
 
@@ -242,14 +277,14 @@ def run_eslint(target_path: str) -> List[Dict]:
                     "code": "",
                 })
         
-        logger.info(f"ESLint found {len(findings)} issues in {target_path}")
+        logger.info(f"[SECURITY-TOOLS] ✅ ESLINT COMPLETED — {len(findings)} findings")
         return findings
         
     except FileNotFoundError:
-        logger.warning("ESLint not installed — skipping JS/TS linting")
+        logger.warning("[SECURITY-TOOLS] ❌ ESLINT NOT INSTALLED — skipping JS/TS linting")
         return []
     except Exception as e:
-        logger.error(f"ESLint error: {e}")
+        logger.error(f"[SECURITY-TOOLS] ❌ ESLINT ERROR: {e}")
         return []
 
 
