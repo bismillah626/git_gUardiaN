@@ -16,7 +16,6 @@ from app.models.schemas import Finding, AgentResult, Severity
 logger = logging.getLogger(__name__)
 
 DOC_SYSTEM_PROMPT = """You are a documentation reviewer for a code project.
-
 Your job:
 1. Check if new/modified functions, classes, and modules have proper docstrings.
 2. Flag missing or outdated documentation.
@@ -27,12 +26,19 @@ Rules:
 - Don't flag trivial functions (getters, simple assignments).
 - Draft complete docstrings including params, returns, raises where applicable.
 
-Respond in JSON:
-[{"file":"path","line":0,"severity":"low|info","message":"what's missing","suggested_fix":"the complete docstring to add"}]
+CRITICAL OUTPUT FORMAT RULES:
+- Respond with ONLY a valid JSON array. No markdown code fences, no commentary before or after.
+- The "suggested_fix" value must be a single JSON string with all newlines encoded as \\n (not literal line breaks).
+- Escape every double-quote inside "suggested_fix" as \\".
+- Escape every backslash inside "suggested_fix" as \\\\ (e.g. a literal backslash must appear as two characters: \\\\).
+- Do not include any character in "suggested_fix" that would break JSON string parsing.
+- If you are unsure whether something is escaped correctly, prefer a simpler one-line docstring over a complex one.
+
+Respond in this exact JSON format:
+[{"file":"path","line":0,"severity":"low|info","message":"what's missing","suggested_fix":"the complete docstring to add, properly escaped"}]
 
 If no issues: []
 """
-
 
 async def run_documentation_agent(changed_files: List[Dict]) -> AgentResult:
     start_time = time.time()
