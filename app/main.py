@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.database import init_db, save_review
+from app.core.database import init_db, save_review, finalize_review_record
 from app.core.github_client import GitHubClient
 from app.models.schemas import PRWebhookPayload, Severity
 from app.agents.supervisor import compile_review_graph
@@ -227,6 +227,10 @@ async def run_review_pipeline(payload: PRWebhookPayload):
             pr = gh.get_pr(payload.repo_full_name, payload.pr_number)
             head_sha = pr.head.sha
             head_branch = pr.head.ref
+            if not payload.pr_url:
+                payload.pr_url = pr.html_url
+            if not payload.pr_title or payload.pr_title == "Manual review":
+                payload.pr_title = pr.title
         
         # Clone repo for security scanning (must clone the PR's branch)
         repo_clone_path = _clone_repo(payload.repo_full_name, head_sha, head_branch)
@@ -237,7 +241,7 @@ async def run_review_pipeline(payload: PRWebhookPayload):
             "pr_number": payload.pr_number,
             "head_sha": head_sha,
             "base_branch": payload.base_branch,
-            "head_branch": payload.head_branch,
+            "head_branch": head_branch or payload.head_branch,
             "changed_files": changed_files,
             "repo_clone_path": repo_clone_path,
             "security_result": None,
@@ -251,13 +255,16 @@ async def run_review_pipeline(payload: PRWebhookPayload):
             "auto_fix_branch": None,
             "start_time": start_time,
             "errors": [],
+            "review_id": None,
+            "pr_url": payload.pr_url,
+            "pr_title": payload.pr_title,
         }
         
         # Run the LangGraph pipeline
         review_graph = compile_review_graph()
         final_state = await review_graph.ainvoke(initial_state)
         
-        # Save to database
+        # Save/finalize in database
         elapsed = time.time() - start_time
         _save_review_to_db(payload, final_state, elapsed)
         
@@ -334,7 +341,11 @@ def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
 
 
 def _save_review_to_db(payload: PRWebhookPayload, state: dict, elapsed: float):
-    """Save the review results to Postgres."""
+    """Save the review results to Postgres.
+    
+    If a review_id exists in state (created by the supervisor's prepare step),
+    we finalize that record. Otherwise, fall back to creating a new row.
+    """
     try:
         findings = state.get("all_findings", [])
         
@@ -348,6 +359,9 @@ def _save_review_to_db(payload: PRWebhookPayload, state: dict, elapsed: float):
             "repo_full_name": payload.repo_full_name,
             "pr_number": payload.pr_number,
             "commit_sha": payload.head_sha or "unknown",
+            "head_branch": state.get("head_branch", payload.head_branch),
+            "pr_url": payload.pr_url,
+            "pr_title": payload.pr_title,
             "total_findings": len(findings),
             "critical_count": severity_counts["critical"],
             "high_count": severity_counts["high"],
@@ -356,11 +370,19 @@ def _save_review_to_db(payload: PRWebhookPayload, state: dict, elapsed: float):
             "info_count": severity_counts["info"],
             "code_health_score": state.get("code_health_score", 0),
             "review_duration_seconds": elapsed,
+            "review_summary": state.get("review_summary", ""),
             "auto_fix_branch": state.get("auto_fix_branch"),
             "findings_json": json.dumps(findings),
         }
         
-        save_review(review_data)
-        logger.info("Saved review to database")
+        review_id = state.get("review_id")
+        if review_id:
+            # Update the placeholder created during pipeline start
+            finalize_review_record(review_id, review_data)
+            logger.info(f"Finalized review #{review_id} in database")
+        else:
+            # Fallback: create a new row (shouldn't normally happen)
+            save_review(review_data)
+            logger.info("Saved review to database (new row)")
     except Exception as e:
         logger.warning(f"Failed to save review to DB: {e}")

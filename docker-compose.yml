@@ -44,6 +44,7 @@ services:
       - .:/app
     environment:
       - DATABASE_URL=postgresql+psycopg2://git_guardian:git_guardian@localhost:5432/git_guardian
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     command: ["streamlit", "run", "app/dashboard/app.py", "--server.port", "8501", "--server.headless", "true"]
     depends_on:
       postgres:

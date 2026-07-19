@@ -17,6 +17,7 @@ import logging
 import os
 import tempfile
 import time
+from datetime import datetime
 from typing import Dict, List, Optional, TypedDict, Annotated
 
 from langgraph.graph import StateGraph, END
@@ -24,6 +25,12 @@ from langgraph.graph import StateGraph, END
 from app.core.config import settings
 from app.core.github_client import GitHubClient
 from app.core.llm_provider import llm_provider
+from app.core.database import (
+    create_review_placeholder,
+    init_agent_statuses,
+    update_agent_status,
+    finalize_review_record,
+)
 from app.models.schemas import Finding, AgentResult, PRReview, Severity
 from app.agents.security_agent import run_security_agent
 from app.agents.quality_agent import run_quality_agent
@@ -63,16 +70,71 @@ class ReviewState(TypedDict):
     start_time: float
     errors: List[str]
 
+    # Dashboard tracking
+    review_id: Optional[int]
+    pr_url: Optional[str]
+    pr_title: Optional[str]
+
 
 # ─── Graph Node Functions ─────────────────────────────────────────────────────
 
 async def prepare_review(state: ReviewState) -> dict:
-    """Prepare the review: clone repo, extract changed files."""
+    """Prepare the review: create tracking record and queue agents."""
     logger.info(f"Preparing review for {state['repo_full_name']}#{state['pr_number']}")
+
+    # Create a placeholder review record in the DB so the dashboard can see it
+    review_id = None
+    try:
+        review_id = create_review_placeholder(
+            repo_full_name=state["repo_full_name"],
+            pr_number=state["pr_number"],
+            head_sha=state.get("head_sha", ""),
+            head_branch=state.get("head_branch", ""),
+            pr_url=state.get("pr_url", ""),
+            pr_title=state.get("pr_title", ""),
+        )
+        init_agent_statuses(review_id)
+        logger.info(f"Created review placeholder #{review_id} with queued agent statuses")
+    except Exception as e:
+        logger.warning(f"Could not create review placeholder: {e}")
+
     return {
         "start_time": time.time(),
         "errors": [],
+        "review_id": review_id,
     }
+
+
+async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args, **kwargs):
+    """Wrapper that updates agent status before/after running a single agent."""
+    try:
+        if review_id:
+            update_agent_status(review_id, agent_name, "running", f"Running {agent_name} analysis...")
+    except Exception:
+        pass  # Don't fail the agent if status tracking fails
+
+    try:
+        result = await agent_func(*args, **kwargs)
+
+        findings_count = len(result.findings) if result and hasattr(result, "findings") else 0
+        try:
+            if review_id:
+                update_agent_status(
+                    review_id, agent_name, "done",
+                    f"{findings_count} finding{'s' if findings_count != 1 else ''} detected",
+                )
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as e:
+        try:
+            if review_id:
+                update_agent_status(review_id, agent_name, "failed", str(e)[:500])
+        except Exception:
+            pass
+        raise
 
 
 async def run_agents_parallel(state: ReviewState) -> dict:
@@ -81,12 +143,25 @@ async def run_agents_parallel(state: ReviewState) -> dict:
     
     changed_files = state["changed_files"]
     repo_clone_path = state.get("repo_clone_path", "")
+    review_id = state.get("review_id")
     
-    # Run all agents concurrently
-    security_task = run_security_agent(changed_files, repo_clone_path)
-    quality_task = run_quality_agent(changed_files)
-    test_gap_task = run_test_gap_agent(changed_files)
-    doc_task = run_documentation_agent(changed_files)
+    # Run all agents concurrently, wrapped with status tracking
+    security_task = _run_single_agent(
+        run_security_agent, "security_result", "security",
+        review_id, changed_files, repo_clone_path,
+    )
+    quality_task = _run_single_agent(
+        run_quality_agent, "quality_result", "quality",
+        review_id, changed_files,
+    )
+    test_gap_task = _run_single_agent(
+        run_test_gap_agent, "test_gap_result", "test_gap",
+        review_id, changed_files,
+    )
+    doc_task = _run_single_agent(
+        run_documentation_agent, "documentation_result", "documentation",
+        review_id, changed_files,
+    )
     
     results = await asyncio.gather(
         security_task, quality_task, test_gap_task, doc_task,
