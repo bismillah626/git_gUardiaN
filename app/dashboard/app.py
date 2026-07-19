@@ -1,22 +1,18 @@
 """
-Git Guardian AI — Streamlit Dashboard.
+Git Guardian AI — Streamlit Dashboard (Dark Mode).
 
-Two views:
-  A) Live Pipeline Monitor — watch agents run in real-time
-  B) Review History & Branch Context — browse past reviews with trends
+Views:
+  A) Live Pipeline Monitor — real-time agent status
+  B) Review History & Branch Context — past reviews with trends
 """
 
-import json
-import os
-import sys
-import logging
+import json, os, sys, logging, time as _time
 from datetime import datetime, timedelta
 
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Add project root to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.core.database import (
@@ -27,72 +23,159 @@ from app.core.database import (
 
 logger = logging.getLogger(__name__)
 
-# ─── Severity color map (consistent with PR comment) ──────────────────────────
+# ─── Constants ─────────────────────────────────────────────────────────────────
 
-SEV_COLORS = {
-    "critical": "#ef4444", "high": "#f97316", "medium": "#eab308",
-    "low": "#3b82f6", "info": "#9ca3af",
-}
-SEV_EMOJI = {
-    "critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "⚪",
-}
-STATUS_COLORS = {
-    "queued": "#6b7280", "running": "#3b82f6", "done": "#22c55e", "failed": "#ef4444",
-}
-STATUS_ICONS = {
-    "queued": "⏳", "running": "🔄", "done": "✅", "failed": "❌",
-}
+SEV_COLORS = {"critical":"#ef4444","high":"#f97316","medium":"#eab308","low":"#3b82f6","info":"#64748b"}
+SEV_EMOJI = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🔵","info":"⚪"}
+STATUS_COLORS = {"queued":"#475569","running":"#6366f1","done":"#22c55e","failed":"#ef4444"}
+STATUS_ICONS = {"queued":"⏳","running":"⚡","done":"✅","failed":"❌"}
 AGENT_DISPLAY = {
-    "security": ("🔒", "Security"),
-    "quality": ("✨", "Code Quality"),
-    "test_gap": ("🧪", "Test Gaps"),
-    "documentation": ("📝", "Documentation"),
+    "security":("🔒","Security"),
+    "quality":("✨","Quality"),
+    "test_gap":("🧪","Test Gaps"),
+    "documentation":("📝","Docs"),
 }
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 
-st.set_page_config(
-    page_title="Git Guardian AI Dashboard",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="Git Guardian AI", page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
 
-# ─── Custom CSS ────────────────────────────────────────────────────────────────
+# ─── Dark Theme CSS ────────────────────────────────────────────────────────────
 
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem; font-weight: 700;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
-    }
-    .agent-card {
-        border-radius: 12px; padding: 1.2rem; min-height: 140px;
-        border: 1px solid rgba(255,255,255,0.08);
-        background: rgba(26, 26, 46, 0.7);
-        backdrop-filter: blur(8px);
-        transition: transform 0.15s ease, box-shadow 0.15s ease;
-    }
-    .agent-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.3); }
-    .agent-card h4 { margin: 0 0 0.5rem 0; font-size: 1rem; }
-    .agent-card .status-badge {
-        display: inline-block; padding: 2px 10px; border-radius: 12px;
-        font-size: 0.8rem; font-weight: 600; color: #fff;
-    }
-    .agent-card .status-msg { font-size: 0.85rem; color: #aaa; margin-top: 0.4rem; }
-    .agent-card .elapsed { font-size: 0.78rem; color: #888; margin-top: 0.3rem; }
-    .summary-strip {
-        border-radius: 12px; padding: 1rem 1.5rem;
-        background: linear-gradient(135deg, rgba(34,197,94,0.12) 0%, rgba(102,126,234,0.12) 100%);
-        border: 1px solid rgba(34,197,94,0.25);
-    }
-    .stMetric > div { background: rgba(102, 126, 234, 0.1); border-radius: 8px; padding: 0.5rem; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+/* ── Global ─────────────────────────────────────────── */
+html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+.stApp { background: #0a0a0f; }
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0f0f1a 0%, #0a0a14 100%) !important;
+    border-right: 1px solid rgba(124,58,237,0.15);
+}
+.block-container { padding: 2rem 3rem 3rem !important; max-width: 1400px; }
+
+/* ── Header ─────────────────────────────────────────── */
+.hero { margin-bottom: 2rem; }
+.hero h1 {
+    font-size: 2.4rem; font-weight: 800; margin: 0;
+    background: linear-gradient(135deg, #a78bfa 0%, #7c3aed 40%, #6d28d9 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    letter-spacing: -0.03em;
+}
+.hero p { color: #94a3b8; font-size: 1rem; margin: 0.3rem 0 0; }
+
+/* ── Divider ────────────────────────────────────────── */
+.divider {
+    height: 1px; margin: 1.5rem 0;
+    background: linear-gradient(90deg, transparent, rgba(124,58,237,0.3), transparent);
+}
+
+/* ── Agent Card ─────────────────────────────────────── */
+.agent-card {
+    background: linear-gradient(145deg, #12121f 0%, #0e0e1a 100%);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 16px; padding: 1.4rem 1.2rem; min-height: 160px;
+    transition: all 0.25s cubic-bezier(.4,0,.2,1);
+    position: relative; overflow: hidden;
+}
+.agent-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    border-radius: 16px 16px 0 0;
+}
+.agent-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    border-color: rgba(124,58,237,0.25);
+}
+.agent-card .icon { font-size: 1.6rem; margin-bottom: 0.4rem; display: block; }
+.agent-card .name { font-size: 0.95rem; font-weight: 700; color: #e2e8f0; margin-bottom: 0.7rem; }
+.agent-card .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 12px; border-radius: 20px;
+    font-size: 0.72rem; font-weight: 700; color: #fff;
+    letter-spacing: 0.05em; text-transform: uppercase;
+}
+.agent-card .msg { font-size: 0.82rem; color: #94a3b8; margin-top: 0.6rem; line-height: 1.4; }
+.agent-card .elapsed { font-size: 0.75rem; color: #64748b; margin-top: 0.4rem; }
+
+/* Status-specific card borders */
+.card-queued::before { background: #475569; }
+.card-running::before { background: linear-gradient(90deg, #6366f1, #a78bfa); }
+.card-done::before { background: #22c55e; }
+.card-failed::before { background: #ef4444; }
+
+/* Running pulse */
+.card-running { animation: pulse-border 2s ease-in-out infinite; }
+@keyframes pulse-border {
+    0%,100% { border-color: rgba(99,102,241,0.15); box-shadow: 0 0 0 rgba(99,102,241,0); }
+    50% { border-color: rgba(99,102,241,0.35); box-shadow: 0 0 20px rgba(99,102,241,0.08); }
+}
+
+/* ── Summary Strip ──────────────────────────────────── */
+.summary-strip {
+    background: linear-gradient(135deg, rgba(34,197,94,0.08) 0%, rgba(99,102,241,0.08) 100%);
+    border: 1px solid rgba(34,197,94,0.2); border-radius: 16px;
+    padding: 1.2rem 1.8rem; color: #e2e8f0; font-size: 0.92rem;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem;
+}
+.summary-strip a { color: #a78bfa; text-decoration: none; font-weight: 600; }
+.summary-strip a:hover { text-decoration: underline; }
+
+/* ── Metric Cards ───────────────────────────────────── */
+[data-testid="stMetric"] {
+    background: linear-gradient(145deg, #12121f, #0e0e1a) !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    border-radius: 14px !important; padding: 1rem 1.2rem !important;
+    transition: all 0.2s ease;
+}
+[data-testid="stMetric"]:hover {
+    border-color: rgba(124,58,237,0.25) !important;
+    transform: translateY(-2px);
+}
+[data-testid="stMetricLabel"] { color: #94a3b8 !important; font-size: 0.82rem !important; }
+[data-testid="stMetricValue"] { color: #e2e8f0 !important; font-weight: 700 !important; }
+
+/* ── Expanders ──────────────────────────────────────── */
+.streamlit-expanderHeader {
+    background: #12121f !important; border-radius: 12px !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    font-size: 0.9rem !important; padding: 0.8rem 1rem !important;
+    transition: all 0.2s ease;
+}
+.streamlit-expanderHeader:hover {
+    border-color: rgba(124,58,237,0.3) !important;
+    background: #161625 !important;
+}
+.streamlit-expanderContent {
+    background: #0c0c16 !important; border-radius: 0 0 12px 12px !important;
+    border: 1px solid rgba(255,255,255,0.04) !important; border-top: none !important;
+}
+
+/* ── Progress Bar ───────────────────────────────────── */
+.stProgress > div > div {
+    background: linear-gradient(90deg, #6366f1, #a78bfa) !important;
+    border-radius: 8px !important;
+}
+.stProgress > div { background: #1a1a2e !important; border-radius: 8px !important; }
+
+/* ── Selectbox & Radio ──────────────────────────────── */
+.stSelectbox > div > div { background: #12121f !important; border-color: rgba(255,255,255,0.08) !important; }
+.stRadio > div { gap: 0.3rem; }
+
+/* ── Sidebar polish ─────────────────────────────────── */
+section[data-testid="stSidebar"] .stMarkdown h1 {
+    font-size: 1.3rem !important; font-weight: 800 !important;
+    background: linear-gradient(135deg, #a78bfa, #7c3aed);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+/* ── Plotly dark ────────────────────────────────────── */
+.js-plotly-plot { border-radius: 12px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Init DB ───────────────────────────────────────────────────────────────────
+# ─── Init ──────────────────────────────────────────────────────────────────────
 
 try:
     init_db()
@@ -101,407 +184,321 @@ except Exception:
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-st.sidebar.markdown("# 🛡️ Git Guardian AI")
-st.sidebar.markdown("### Live Dashboard")
-st.sidebar.markdown("---")
+with st.sidebar:
+    st.markdown("# 🛡️ Git Guardian AI")
+    st.caption("Multi-Agent Code Review Platform")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-view = st.sidebar.radio(
-    "📌 Navigation",
-    ["🔴 Live Pipeline Monitor", "📋 Review History"],
-    index=0,
-)
+    view = st.radio("Navigation", ["🔴  Live Pipeline", "📋  Review History"], index=0, label_visibility="collapsed")
 
-st.sidebar.markdown("---")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-# Quick stats
-try:
-    all_reviews = get_all_reviews(limit=500)
-except Exception as e:
-    st.sidebar.error(f"DB error: {e}")
-    all_reviews = []
+    try:
+        all_reviews = get_all_reviews(limit=500)
+    except Exception as e:
+        st.error(f"DB: {e}")
+        all_reviews = []
 
-repos = sorted(set(r.repo_full_name for r in all_reviews)) if all_reviews else []
-st.sidebar.markdown(f"**Total Reviews:** {len(all_reviews)}")
-st.sidebar.markdown(f"**Repos Tracked:** {len(repos)}")
+    repos = sorted(set(r.repo_full_name for r in all_reviews)) if all_reviews else []
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Reviews", len(all_reviews))
+    with c2:
+        st.metric("Repos", len(repos))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VIEW A — LIVE PIPELINE MONITOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def render_agent_card(agent_name: str, status_row):
-    """Render a single agent status card."""
-    icon, display_name = AGENT_DISPLAY.get(agent_name, ("🤖", agent_name))
+def _agent_card_html(agent_name, status_row):
+    icon, name = AGENT_DISPLAY.get(agent_name, ("🤖", agent_name))
     status = status_row.status if status_row else "queued"
-    msg = status_row.status_message if status_row else "Waiting..."
-    color = STATUS_COLORS.get(status, "#6b7280")
-    status_icon = STATUS_ICONS.get(status, "⏳")
-
-    # Elapsed time
-    elapsed_str = ""
+    msg = (status_row.status_message if status_row else "Waiting...") or "—"
+    color = STATUS_COLORS.get(status, "#475569")
+    s_icon = STATUS_ICONS.get(status, "⏳")
+    elapsed = ""
     if status_row and status_row.started_at:
         end = status_row.completed_at or datetime.utcnow()
-        secs = (end - status_row.started_at).total_seconds()
-        elapsed_str = f"{secs:.1f}s"
-
-    st.markdown(f"""
-    <div class="agent-card" style="border-left: 4px solid {color};">
-        <h4>{icon} {display_name}</h4>
-        <span class="status-badge" style="background:{color};">
-            {status_icon} {status.upper()}
-        </span>
-        <div class="status-msg">{msg or '—'}</div>
-        {'<div class="elapsed">⏱ ' + elapsed_str + '</div>' if elapsed_str else ''}
-    </div>
-    """, unsafe_allow_html=True)
+        elapsed = f'<div class="elapsed">⏱ {(end - status_row.started_at).total_seconds():.1f}s</div>'
+    return f"""
+    <div class="agent-card card-{status}">
+        <span class="icon">{icon}</span>
+        <div class="name">{name}</div>
+        <span class="badge" style="background:{color};">{s_icon} {status.upper()}</span>
+        <div class="msg">{msg}</div>
+        {elapsed}
+    </div>"""
 
 
 def render_live_monitor():
-    st.markdown('<p class="main-header">🔴 Live Pipeline Monitor</p>', unsafe_allow_html=True)
-    st.markdown("*Watch agents analyze your PR in real-time*")
-    st.markdown("---")
+    st.markdown('<div class="hero"><h1>🔴 Live Pipeline Monitor</h1><p>Watch agents analyze your PR in real-time</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # Pick which review to watch
     in_progress = get_latest_in_progress_review()
-    review_options = []
-
-    # Build dropdown options from recent reviews
     recent = get_all_reviews(limit=20)
+    opts = []
     for r in recent:
-        label = f"#{r.id} — {r.repo_full_name} PR #{r.pr_number}"
-        if r == in_progress:
-            label += " 🔴 IN PROGRESS"
-        review_options.append((label, r.id))
+        lbl = f"#{r.id} — {r.repo_full_name} PR #{r.pr_number}"
+        if in_progress and r.id == in_progress.id:
+            lbl += "  🔴 LIVE"
+        opts.append((lbl, r.id))
 
-    if not review_options:
-        st.info("👋 **No reviews yet!** Trigger a review via `/review` to see live agent progress here.")
+    if not opts:
+        st.info("👋 **No reviews yet.** Trigger one via `POST /review` to see live progress.")
         return
 
-    # Default to in-progress if available
     default_idx = 0
     if in_progress:
-        for i, (_, rid) in enumerate(review_options):
+        for i, (_, rid) in enumerate(opts):
             if rid == in_progress.id:
                 default_idx = i
                 break
 
-    selected_label = st.selectbox(
-        "🎯 Select Review to Monitor",
-        [opt[0] for opt in review_options],
-        index=default_idx,
-    )
-    selected_id = review_options[[opt[0] for opt in review_options].index(selected_label)][1]
+    sel = st.selectbox("🎯 Select Review", [o[0] for o in opts], index=default_idx)
+    sel_id = opts[[o[0] for o in opts].index(sel)][1]
 
-    review = get_review_by_id(selected_id)
+    review = get_review_by_id(sel_id)
     if not review:
         st.error("Review not found.")
         return
 
-    statuses = get_agent_statuses(selected_id)
-    status_map = {s.agent_name: s for s in statuses}
-
-    # Determine if still running
+    statuses = get_agent_statuses(sel_id)
+    smap = {s.agent_name: s for s in statuses}
+    agents = ["security", "quality", "test_gap", "documentation"]
     terminal = {"done", "failed"}
-    agent_names = ["security", "quality", "test_gap", "documentation"]
-    done_count = sum(1 for a in agent_names if status_map.get(a) and status_map[a].status in terminal)
-    is_running = done_count < len(agent_names) and len(statuses) > 0
+    done_count = sum(1 for a in agents if smap.get(a) and smap[a].status in terminal)
+    is_running = done_count < len(agents) and len(statuses) > 0
 
-    # Overall progress
+    # Context bar
+    ctx_parts = [f"**{review.repo_full_name}** PR #{review.pr_number}"]
+    if review.head_branch:
+        ctx_parts.append(f"`{review.head_branch}`")
+    if review.pr_title and review.pr_title != "Manual review":
+        ctx_parts.append(f"*{review.pr_title}*")
+    st.markdown(" · ".join(ctx_parts))
+
+    # Progress
     if statuses:
-        st.markdown(f"### {'🔄' if is_running else '✅'} {done_count} of {len(agent_names)} agents complete")
-        st.progress(done_count / len(agent_names))
+        lbl = "🔄 Running..." if is_running else "✅ Complete"
+        st.markdown(f"**{lbl}** — {done_count}/{len(agents)} agents finished")
+        st.progress(done_count / len(agents))
     else:
-        st.warning("No agent status data for this review (may have been created before live tracking was added).")
-
-    # Agent cards grid
-    cols = st.columns(4)
-    for i, agent in enumerate(agent_names):
-        with cols[i]:
-            render_agent_card(agent, status_map.get(agent))
+        st.warning("No agent tracking data for this review (created before live tracking).")
 
     st.markdown("")
 
-    # Completion summary strip
-    if not is_running and review.total_findings is not None and review.total_findings >= 0 and statuses:
+    # Agent cards
+    cols = st.columns(4, gap="medium")
+    for i, a in enumerate(agents):
+        with cols[i]:
+            st.markdown(_agent_card_html(a, smap.get(a)), unsafe_allow_html=True)
+
+    # Completion summary
+    if not is_running and statuses and review.total_findings is not None:
         score = review.code_health_score or 0
-        if score >= 80:
-            h_emoji = "🟢"
-        elif score >= 60:
-            h_emoji = "🟡"
-        elif score >= 40:
-            h_emoji = "🟠"
-        else:
-            h_emoji = "🔴"
-
-        st.markdown("---")
+        he = "🟢" if score >= 80 else "🟡" if score >= 60 else "🟠" if score >= 40 else "🔴"
+        link = f'<a href="{review.pr_url}" target="_blank">View PR ↗</a>' if review.pr_url else ""
         st.markdown(f"""
-        <div class="summary-strip">
-            <strong>✅ Review Complete</strong> &nbsp;|&nbsp;
-            Health: {h_emoji} <strong>{score:.0f}/100</strong> &nbsp;|&nbsp;
-            🔴 {review.critical_count or 0} Critical &nbsp;
-            🟠 {review.high_count or 0} High &nbsp;
-            🟡 {review.medium_count or 0} Medium &nbsp;
-            🔵 {review.low_count or 0} Low &nbsp;
-            ⚪ {review.info_count or 0} Info &nbsp;|&nbsp;
-            ⏱ {review.review_duration_seconds:.1f}s
-            {'&nbsp;|&nbsp; <a href="' + review.pr_url + '" target="_blank">View PR ↗</a>' if review.pr_url else ''}
-        </div>
-        """, unsafe_allow_html=True)
+        <div class="summary-strip" style="margin-top:1.5rem;">
+            <span>✅ <strong>Review Complete</strong></span>
+            <span>│</span>
+            <span>Health: {he} <strong>{score:.0f}/100</strong></span>
+            <span>│</span>
+            <span>🔴 {review.critical_count or 0} &nbsp; 🟠 {review.high_count or 0} &nbsp; 🟡 {review.medium_count or 0} &nbsp; 🔵 {review.low_count or 0} &nbsp; ⚪ {review.info_count or 0}</span>
+            <span>│</span>
+            <span>⏱ {review.review_duration_seconds:.1f}s</span>
+            {f'<span>│</span><span>{link}</span>' if link else ''}
+        </div>""", unsafe_allow_html=True)
 
-    # Auto-refresh if still running
+        # Show findings inline
+        if review.findings_json:
+            st.markdown("")
+            with st.expander("📋 View Findings Breakdown", expanded=False):
+                _render_findings(review.findings_json)
+
     if is_running:
-        import time as _time
         _time.sleep(3)
         st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# VIEW B — REVIEW HISTORY & BRANCH CONTEXT
+# VIEW B — REVIEW HISTORY
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_autofix_branch_state(repo_full_name: str, branch_name: str):
-    """Query GitHub for the current state of an auto-fix branch/PR."""
+def _get_autofix_state(repo, branch):
     try:
         from app.core.github_client import GitHubClient
         gh = GitHubClient()
-        repo = gh.get_repo(repo_full_name)
-
-        # Look for PRs from this branch
-        pulls = repo.get_pulls(state="all", head=f"{repo_full_name.split('/')[0]}:{branch_name}")
+        r = gh.get_repo(repo)
+        pulls = r.get_pulls(state="all", head=f"{repo.split('/')[0]}:{branch}")
         for pr in pulls:
-            if pr.merged:
-                return "merged", pr.html_url
-            elif pr.state == "closed":
-                return "closed", pr.html_url
-            else:
-                return "open", pr.html_url
-
-        # No PR found — check if branch exists
+            if pr.merged: return "merged", pr.html_url
+            elif pr.state == "closed": return "closed", pr.html_url
+            else: return "open", pr.html_url
         try:
-            repo.get_branch(branch_name)
+            r.get_branch(branch)
             return "branch_only", None
         except Exception:
             return "deleted", None
-    except Exception as e:
-        logger.warning(f"GitHub lookup failed for {branch_name}: {e}")
+    except Exception:
         return "unknown", None
 
 
-def render_findings_detail(findings_json: str):
-    """Render finding breakdown matching the PR comment structure."""
+def _render_findings(findings_json):
     try:
         findings = json.loads(findings_json) if findings_json else []
     except (json.JSONDecodeError, TypeError):
         findings = []
-
     if not findings:
-        st.info("No findings for this review.")
+        st.info("No findings.")
         return
 
-    # Group by agent
     by_agent = {}
     for f in findings:
-        agent = f.get("agent", "unknown")
-        by_agent.setdefault(agent, []).append(f)
+        by_agent.setdefault(f.get("agent", "unknown"), []).append(f)
 
-    for agent, agent_findings in by_agent.items():
+    for agent, af in by_agent.items():
         icon, title = AGENT_DISPLAY.get(agent, ("🤖", agent.capitalize()))
-        st.markdown(f"**{icon} {title}** ({len(agent_findings)} findings)")
-
-        for f in agent_findings:
+        st.markdown(f"#### {icon} {title}  `{len(af)}`")
+        for f in af:
             sev = f.get("severity", "info")
-            emoji = SEV_EMOJI.get(sev, "⚪")
-            file_ref = f.get("file", "?")
-            line = f.get("line", 0)
-            loc = f"`{file_ref}:{line}`" if line else f"`{file_ref}`"
+            color = SEV_COLORS.get(sev, "#64748b")
+            loc = f.get("file", "?")
+            if f.get("line", 0) > 0:
+                loc += f":{f['line']}"
             st.markdown(
-                f"- {emoji} **[{sev.upper()}]** {loc} — {f.get('message', 'N/A')}"
+                f'<span style="color:{color};font-weight:700;">[{sev.upper()}]</span> '
+                f'`{loc}` — {f.get("message", "")}',
+                unsafe_allow_html=True,
             )
             if f.get("source_tool") and agent == "security":
-                st.caption(f"   🔧 Tool: `{f['source_tool']}` | Rule: `{f.get('rule_id', 'N/A')}`")
+                st.caption(f"🔧 `{f['source_tool']}` · Rule: `{f.get('rule_id','N/A')}`")
             if f.get("suggested_fix"):
-                with st.expander("💡 Suggested fix"):
+                with st.expander("💡 Suggested fix", expanded=False):
                     st.code(f["suggested_fix"][:500])
 
 
 def render_history():
-    st.markdown('<p class="main-header">📋 Review History & Branch Context</p>', unsafe_allow_html=True)
-    st.markdown("*Browse past reviews, track code health, and monitor auto-fix branches*")
-    st.markdown("---")
+    st.markdown('<div class="hero"><h1>📋 Review History</h1><p>Browse past reviews, track code health, and monitor branches</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # Repo filter
-    selected_repo = st.selectbox(
-        "📁 Filter by Repository",
-        options=["All Repositories"] + repos,
-        index=0,
-    )
-
-    if selected_repo != "All Repositories":
-        reviews = [r for r in all_reviews if r.repo_full_name == selected_repo]
-    else:
-        reviews = all_reviews
+    repo_filter = st.selectbox("📁 Repository", ["All"] + repos, index=0)
+    reviews = [r for r in all_reviews if repo_filter == "All" or r.repo_full_name == repo_filter]
 
     if not reviews:
-        st.info("👋 **No reviews yet!** Trigger a PR review to see data here.")
+        st.info("👋 **No reviews yet.** Trigger a PR review to see data here.")
         return
 
-    # ── Key Metrics ────────────────────────────────────────────────────────
-    col1, col2, col3, col4, col5 = st.columns(5)
-    total_findings = sum(r.total_findings for r in reviews)
-    total_critical = sum(r.critical_count for r in reviews)
-    avg_health = sum(r.code_health_score for r in reviews) / len(reviews) if reviews else 0
-    avg_duration = sum(r.review_duration_seconds for r in reviews) / len(reviews) if reviews else 0
+    # ── Metrics row ────────────────────────────────────────────────────────
+    total_f = sum(r.total_findings for r in reviews)
+    total_c = sum(r.critical_count for r in reviews)
+    avg_h = sum(r.code_health_score for r in reviews) / len(reviews)
+    avg_d = sum(r.review_duration_seconds for r in reviews) / len(reviews)
 
-    with col1:
-        st.metric("Total Reviews", len(reviews))
-    with col2:
-        st.metric("Total Findings", total_findings)
-    with col3:
-        st.metric("🔴 Critical", total_critical)
-    with col4:
-        st.metric("Avg Health", f"{avg_health:.0f}/100")
-    with col5:
-        st.metric("Avg Time", f"{avg_duration:.1f}s")
+    m = st.columns(5, gap="medium")
+    m[0].metric("Reviews", len(reviews))
+    m[1].metric("Findings", total_f)
+    m[2].metric("🔴 Critical", total_c)
+    m[3].metric("Avg Health", f"{avg_h:.0f}/100")
+    m[4].metric("Avg Time", f"{avg_d:.1f}s")
 
-    st.markdown("---")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # ── Charts ─────────────────────────────────────────────────────────────
-    chart_col1, chart_col2 = st.columns(2)
+    tab1, tab2, tab3 = st.tabs(["📊 Severity", "📈 Health Trend", "⏱️ Turnaround"])
 
-    # Severity breakdown
-    with chart_col1:
-        st.subheader("📊 Severity Breakdown")
-        sev_data = {
-            "Critical": total_critical,
-            "High": sum(r.high_count for r in reviews),
-            "Medium": sum(r.medium_count for r in reviews),
-            "Low": sum(r.low_count for r in reviews),
-            "Info": sum(r.info_count for r in reviews),
-        }
-        sev_data = {k: v for k, v in sev_data.items() if v > 0}
-        if sev_data:
-            fig_pie = px.pie(
-                names=list(sev_data.keys()), values=list(sev_data.values()),
-                color=list(sev_data.keys()),
-                color_discrete_map={
-                    "Critical": "#ef4444", "High": "#f97316", "Medium": "#eab308",
-                    "Low": "#3b82f6", "Info": "#9ca3af",
-                },
-                hole=0.4,
-            )
-            fig_pie.update_layout(
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                font_color="white", margin=dict(t=20, b=20, l=20, r=20),
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
+    plot_layout = dict(
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#94a3b8", family="Inter"), margin=dict(t=30, b=30, l=40, r=20),
+    )
+
+    with tab1:
+        sd = {"Critical": total_c, "High": sum(r.high_count for r in reviews),
+              "Medium": sum(r.medium_count for r in reviews), "Low": sum(r.low_count for r in reviews),
+              "Info": sum(r.info_count for r in reviews)}
+        sd = {k: v for k, v in sd.items() if v > 0}
+        if sd:
+            fig = px.pie(names=list(sd.keys()), values=list(sd.values()), color=list(sd.keys()),
+                         color_discrete_map={"Critical":"#ef4444","High":"#f97316","Medium":"#eab308","Low":"#3b82f6","Info":"#64748b"},
+                         hole=0.45)
+            fig.update_layout(**plot_layout)
+            fig.update_traces(textfont_color="#e2e8f0")
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No findings to display")
 
-    # Health trend
-    with chart_col2:
-        st.subheader("📈 Code Health Trend")
+    with tab2:
         if len(reviews) >= 2:
-            health_data = sorted(
-                [(r.created_at, r.code_health_score, r.repo_full_name) for r in reviews],
-                key=lambda x: x[0],
-            )
-            fig_trend = go.Figure()
-            repos_in_data = set(d[2] for d in health_data)
-            colors = px.colors.qualitative.Set2
-            for i, repo in enumerate(repos_in_data):
-                repo_data = [(d[0], d[1]) for d in health_data if d[2] == repo]
-                dates, scores = zip(*repo_data)
-                fig_trend.add_trace(go.Scatter(
-                    x=list(dates), y=list(scores),
-                    mode="lines+markers", name=repo.split("/")[-1],
-                    line=dict(color=colors[i % len(colors)], width=2),
-                    marker=dict(size=6),
-                ))
-            fig_trend.update_layout(
-                yaxis_title="Health Score", yaxis_range=[0, 105],
-                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-                font_color="white", margin=dict(t=20, b=20, l=40, r=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            )
-            st.plotly_chart(fig_trend, use_container_width=True)
+            hd = sorted([(r.created_at, r.code_health_score, r.repo_full_name) for r in reviews], key=lambda x: x[0])
+            fig = go.Figure()
+            colors = ["#a78bfa","#22c55e","#f97316","#3b82f6","#ec4899"]
+            for i, repo in enumerate(set(d[2] for d in hd)):
+                rd = [(d[0], d[1]) for d in hd if d[2] == repo]
+                dates, scores = zip(*rd)
+                fig.add_trace(go.Scatter(x=list(dates), y=list(scores), mode="lines+markers",
+                    name=repo.split("/")[-1], line=dict(color=colors[i%len(colors)], width=2.5),
+                    marker=dict(size=7)))
+            fig.update_layout(yaxis_title="Score", yaxis_range=[0, 105],
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02), **plot_layout)
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Need at least 2 reviews for trend data")
+            st.info("Need ≥ 2 reviews for a trend")
 
-    st.markdown("---")
+    with tab3:
+        if reviews:
+            td = sorted([(r.created_at, r.review_duration_seconds, r.repo_full_name) for r in reviews], key=lambda x: x[0])
+            dates, durs, _ = zip(*td)
+            fig = go.Figure(go.Bar(x=list(dates), y=list(durs),
+                marker_color=["#6366f1" if d < avg_d else "#ef4444" for d in durs],
+                text=[f"{d:.1f}s" for d in durs], textposition="auto", textfont=dict(color="#e2e8f0")))
+            fig.update_layout(yaxis_title="Seconds", **plot_layout)
+            st.plotly_chart(fig, use_container_width=True)
 
-    # ── Review Table ───────────────────────────────────────────────────────
-    st.subheader("📋 Recent Reviews")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # ── Reviews list ───────────────────────────────────────────────────────
+    st.markdown("### 📋 Recent Reviews")
 
     for r in reviews[:30]:
-        if r.code_health_score >= 80:
-            h_emoji = "🟢"
-        elif r.code_health_score >= 60:
-            h_emoji = "🟡"
-        elif r.code_health_score >= 40:
-            h_emoji = "🟠"
-        else:
-            h_emoji = "🔴"
+        he = "🟢" if r.code_health_score >= 80 else "🟡" if r.code_health_score >= 60 else "🟠" if r.code_health_score >= 40 else "🔴"
+        branch = f" · `{r.head_branch}`" if r.head_branch else ""
+        title = f" — {r.pr_title}" if r.pr_title else ""
+        ts = r.created_at.strftime('%b %d, %H:%M') if r.created_at else '?'
 
-        branch_info = f" | `{r.head_branch}`" if r.head_branch else ""
-        title_info = f" — {r.pr_title}" if r.pr_title else ""
-        ts = r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else 'N/A'
-
-        with st.expander(
-            f"{h_emoji} **{r.repo_full_name}** PR #{r.pr_number}{title_info} | "
-            f"Score: {r.code_health_score:.0f}/100 | "
-            f"{r.total_findings} findings{branch_info} | {ts}"
-        ):
-            # Detail metrics row
-            dc = st.columns(7)
-            with dc[0]:
-                st.metric("🔴 Critical", r.critical_count)
-            with dc[1]:
-                st.metric("🟠 High", r.high_count)
-            with dc[2]:
-                st.metric("🟡 Medium", r.medium_count)
-            with dc[3]:
-                st.metric("🔵 Low", r.low_count)
-            with dc[4]:
-                st.metric("⚪ Info", r.info_count)
-            with dc[5]:
-                st.metric("⏱️ Duration", f"{r.review_duration_seconds:.1f}s")
+        with st.expander(f"{he} **{r.repo_full_name}** #{r.pr_number}{title} · {r.code_health_score:.0f}/100 · {r.total_findings} findings{branch} · {ts}"):
+            dc = st.columns(7, gap="small")
+            dc[0].metric("🔴 Critical", r.critical_count)
+            dc[1].metric("🟠 High", r.high_count)
+            dc[2].metric("🟡 Medium", r.medium_count)
+            dc[3].metric("🔵 Low", r.low_count)
+            dc[4].metric("⚪ Info", r.info_count)
+            dc[5].metric("⏱ Duration", f"{r.review_duration_seconds:.1f}s")
             with dc[6]:
                 if r.pr_url:
-                    st.markdown(f"[View PR ↗]({r.pr_url})")
-                st.caption(f"Commit: `{r.commit_sha[:8] if r.commit_sha else 'N/A'}`")
+                    st.link_button("View PR ↗", r.pr_url)
+                st.caption(f"`{r.commit_sha[:8] if r.commit_sha else '?'}`")
 
-            # Auto-fix branch status
             if r.auto_fix_branch:
-                state, pr_url = _get_autofix_branch_state(r.repo_full_name, r.auto_fix_branch)
-                state_labels = {
-                    "open": "🟢 Open (awaiting review)",
-                    "merged": "✅ Merged",
-                    "closed": "🔴 Closed",
-                    "branch_only": "🟡 Branch exists (no PR)",
-                    "deleted": "⚪ Deleted",
-                    "unknown": "❓ Unknown",
-                }
-                label = state_labels.get(state, state)
-                link = f" — [View PR ↗]({pr_url})" if pr_url else ""
-                st.info(f"🔧 Auto-fix branch: `{r.auto_fix_branch}` → {label}{link}")
+                state, pr_url = _get_autofix_state(r.repo_full_name, r.auto_fix_branch)
+                labels = {"open":"🟢 Open","merged":"✅ Merged","closed":"🔴 Closed",
+                          "branch_only":"🟡 No PR","deleted":"⚪ Deleted","unknown":"❓ Unknown"}
+                link = f" — [View ↗]({pr_url})" if pr_url else ""
+                st.info(f"🔧 `{r.auto_fix_branch}` → {labels.get(state, state)}{link}")
 
-            # Full findings breakdown
             if r.findings_json:
-                render_findings_detail(r.findings_json)
+                _render_findings(r.findings_json)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MAIN ROUTER
+# ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if view == "🔴 Live Pipeline Monitor":
+if "Live" in view:
     render_live_monitor()
 else:
     render_history()
 
-# ─── Footer ───────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    "*🛡️ Git Guardian AI — Multi-Agent Code Review & DevSecOps Platform | "
-    "Powered by LangGraph, Groq, ChromaDB*"
-)
+st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+st.caption("🛡️ Git Guardian AI — Powered by LangGraph, Groq, ChromaDB")
