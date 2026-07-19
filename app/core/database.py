@@ -247,24 +247,27 @@ def get_latest_in_progress_review() -> Optional[ReviewRecordDB]:
     """Get the most recent review that still has agents not in done/failed state."""
     db = SessionLocal()
     try:
-        # Find reviews that have at least one agent not in a terminal state
-        from sqlalchemy import exists, and_
-        reviews = (
-            db.query(ReviewRecordDB)
-            .filter(
-                exists(
-                    db.query(AgentRunStatusDB.id).filter(
-                        and_(
-                            AgentRunStatusDB.review_id == ReviewRecordDB.id,
-                            AgentRunStatusDB.status.in_(["queued", "running"]),
-                        )
-                    )
+        from sqlalchemy import select, exists, and_
+        # Use a proper exists() subquery
+        subq = (
+            select(AgentRunStatusDB.id)
+            .where(
+                and_(
+                    AgentRunStatusDB.review_id == ReviewRecordDB.id,
+                    AgentRunStatusDB.status.in_(["queued", "running"]),
                 )
             )
+            .exists()
+        )
+        result = (
+            db.query(ReviewRecordDB)
+            .filter(subq)
             .order_by(ReviewRecordDB.created_at.desc())
             .first()
         )
-        return reviews
+        return result
+    except Exception:
+        return None
     finally:
         db.close()
 
