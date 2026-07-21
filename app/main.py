@@ -22,7 +22,10 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.database import init_db, save_review, finalize_review_record
 from app.core.github_client import GitHubClient
-from app.models.schemas import PRWebhookPayload, Severity
+from app.models.schemas import (
+    PRWebhookPayload, Severity,
+    ScanRepoRequest, ScanRepoResponse, TriggerPRScanRequest,
+)
 from app.agents.supervisor import compile_review_graph
 from app.services.rag_service import rag_service
 from app.services.security_tools import check_tool_availability
@@ -98,6 +101,231 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+# ─── Rate Limiting Infrastructure ──────────────────────────────────────────────
+
+import threading
+from collections import defaultdict
+
+class _RateLimiter:
+    """Thread-safe sliding-window rate limiter.
+
+    Security properties:
+    - Per-IP tracking prevents a single user from monopolizing the server.
+    - Global cap prevents distributed attacks from overwhelming the system.
+    - Sliding window (not fixed-bucket) prevents burst-at-boundary exploits.
+    - Automatic cleanup of stale entries prevents memory exhaustion.
+    """
+
+    def __init__(
+        self,
+        per_ip_max: int = 5,
+        per_ip_window: int = 60,
+        global_max: int = 30,
+        global_window: int = 60,
+    ):
+        self.per_ip_max = per_ip_max
+        self.per_ip_window = per_ip_window
+        self.global_max = global_max
+        self.global_window = global_window
+        self._ip_hits: dict[str, list[float]] = defaultdict(list)
+        self._global_hits: list[float] = []
+        self._lock = threading.Lock()
+
+    def _cleanup(self, hits: list[float], window: int) -> list[float]:
+        now = time.time()
+        return [t for t in hits if now - t < window]
+
+    def check(self, client_ip: str) -> tuple[bool, str]:
+        """Returns (allowed, reason). Thread-safe."""
+        with self._lock:
+            now = time.time()
+
+            # Per-IP check
+            self._ip_hits[client_ip] = self._cleanup(
+                self._ip_hits[client_ip], self.per_ip_window
+            )
+            if len(self._ip_hits[client_ip]) >= self.per_ip_max:
+                return False, (
+                    f"Rate limit exceeded. Max {self.per_ip_max} requests "
+                    f"per {self.per_ip_window}s per IP."
+                )
+
+            # Global check
+            self._global_hits = self._cleanup(self._global_hits, self.global_window)
+            if len(self._global_hits) >= self.global_max:
+                return False, "Server is busy. Please try again shortly."
+
+            # Record hit
+            self._ip_hits[client_ip].append(now)
+            self._global_hits.append(now)
+
+            # Periodic stale-IP cleanup (every 100 global hits)
+            if len(self._global_hits) % 100 == 0:
+                stale_ips = [
+                    ip for ip, hits in self._ip_hits.items()
+                    if not self._cleanup(hits, self.per_ip_window)
+                ]
+                for ip in stale_ips:
+                    del self._ip_hits[ip]
+
+            return True, ""
+
+
+# Separate limiters for listing PRs (lighter) and triggering scans (heavier)
+_scan_list_limiter = _RateLimiter(per_ip_max=10, per_ip_window=60, global_max=60, global_window=60)
+_scan_trigger_limiter = _RateLimiter(per_ip_max=3, per_ip_window=120, global_max=15, global_window=120)
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract the real client IP, respecting reverse-proxy headers."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        # Take the first IP (the actual client, not intermediary proxies)
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+# ─── Scan Repo Endpoints ───────────────────────────────────────────────────────
+
+@app.post("/api/scan-repo", response_model=ScanRepoResponse)
+async def scan_repo_for_prs(request: Request):
+    """List open pull requests for a GitHub repository.
+
+    Security:
+    - Pydantic validates URL is strictly github.com/owner/repo format.
+    - Rate limited per-IP (10/min) and globally (60/min).
+    - Request body size implicitly limited by FastAPI/Starlette defaults.
+    """
+    # Rate limit check
+    client_ip = _get_client_ip(request)
+    allowed, reason = _scan_list_limiter.check(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+
+    # Parse and validate body (Pydantic enforces GitHub URL format)
+    try:
+        body = await request.json()
+        scan_req = ScanRepoRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid request: {e}")
+
+    repo_full_name = scan_req.repo_full_name
+
+    # Fetch open PRs from GitHub
+    try:
+        gh = GitHubClient()
+        repo = gh.get_repo(repo_full_name)
+        pulls = repo.get_pulls(state="open", sort="updated", direction="desc")
+
+        open_prs = []
+        count = 0
+        for pr in pulls:
+            if count >= 50:  # Hard cap at 50 PRs to prevent abuse
+                break
+            try:
+                open_prs.append({
+                    "number": pr.number,
+                    "title": pr.title,
+                    "author": pr.user.login if pr.user else "unknown",
+                    "created_at": pr.created_at.isoformat() if pr.created_at else "",
+                    "updated_at": pr.updated_at.isoformat() if pr.updated_at else "",
+                    "head_branch": pr.head.ref,
+                    "base_branch": pr.base.ref,
+                    "html_url": pr.html_url,
+                    "additions": pr.additions,
+                    "deletions": pr.deletions,
+                    "changed_files": pr.changed_files,
+                })
+                count += 1
+            except Exception as pr_err:
+                logger.warning(f"Skipping PR due to error: {pr_err}")
+                continue
+
+        return ScanRepoResponse(
+            repo_full_name=repo_full_name,
+            open_prs=open_prs,
+            message=f"Found {len(open_prs)} open PR(s)",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch PRs for {repo_full_name}: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not access repository: {repo_full_name}. Ensure it exists and the token has access.",
+        )
+
+
+@app.post("/api/trigger-scan")
+async def trigger_pr_scan(request: Request, background_tasks: BackgroundTasks):
+    """Trigger the Git Guardian pipeline on a specific PR.
+
+    Security:
+    - Stricter rate limit (3 per 2 min per IP) because this is expensive.
+    - Pydantic validates both the URL and the PR number.
+    - PR number is bounded [1, 999999] to prevent overflows.
+    """
+    # Rate limit check
+    client_ip = _get_client_ip(request)
+    allowed, reason = _scan_trigger_limiter.check(client_ip)
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
+
+    # Parse and validate body
+    try:
+        body = await request.json()
+        trigger_req = TriggerPRScanRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Invalid request: {e}")
+
+    # Extract repo full name from validated URL
+    match = __import__("re").match(
+        r"https://github\.com/([^/]+)/([^/]+)",
+        trigger_req.github_url,
+    )
+    if not match:
+        raise HTTPException(status_code=422, detail="Invalid GitHub URL.")
+
+    repo_full_name = f"{match.group(1)}/{match.group(2)}"
+    pr_number = trigger_req.pr_number
+
+    # Verify PR actually exists before queuing expensive work
+    try:
+        gh = GitHubClient()
+        pr = gh.get_pr(repo_full_name, pr_number)
+    except Exception as e:
+        raise HTTPException(
+            status_code=404,
+            detail=f"PR #{pr_number} not found in {repo_full_name}.",
+        )
+
+    # Build webhook payload and trigger pipeline
+    webhook_payload = PRWebhookPayload(
+        action="dashboard_scan",
+        pr_number=pr_number,
+        repo_full_name=repo_full_name,
+        head_sha=pr.head.sha,
+        base_branch=pr.base.ref,
+        head_branch=pr.head.ref,
+        pr_title=pr.title,
+        pr_url=pr.html_url,
+        sender="dashboard",
+    )
+
+    background_tasks.add_task(run_review_pipeline, webhook_payload)
+
+    return JSONResponse(
+        content={
+            "message": "Security pipeline triggered",
+            "repo": repo_full_name,
+            "pr_number": pr_number,
+            "pr_title": pr.title,
+        },
+        status_code=202,
+    )
 
 
 # ─── Webhook Endpoint ─────────────────────────────────────────────────────────

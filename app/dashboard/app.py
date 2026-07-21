@@ -4,11 +4,13 @@ Git Guardian AI — Streamlit Dashboard (Dark Mode).
 Views:
   A) Live Pipeline Monitor — real-time agent status
   B) Review History & Branch Context — past reviews with trends
+  C) Scan Repository — enter a GitHub URL, list PRs, trigger pipeline
 """
 
-import json, os, sys, logging, time as _time
+import json, os, sys, logging, time as _time, re
 from datetime import datetime, timedelta
 
+import httpx
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -172,6 +174,89 @@ section[data-testid="stSidebar"] .stMarkdown h1 {
 
 /* ── Plotly dark ────────────────────────────────────── */
 .js-plotly-plot { border-radius: 12px; overflow: hidden; }
+
+/* ── Scan Repo View ────────────────────────────────── */
+.scan-input-card {
+    background: linear-gradient(145deg, #12121f 0%, #0e0e1a 100%);
+    border: 1px solid rgba(124,58,237,0.2);
+    border-radius: 20px; padding: 2rem 2.2rem;
+    position: relative; overflow: hidden;
+}
+.scan-input-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, #6366f1, #a78bfa, #c084fc);
+    border-radius: 20px 20px 0 0;
+}
+.scan-input-card h3 {
+    color: #e2e8f0; font-weight: 700; font-size: 1.1rem; margin-bottom: 0.8rem;
+}
+.scan-input-card p { color: #94a3b8; font-size: 0.85rem; margin: 0; }
+
+/* Input field override */
+.scan-input-card .stTextInput > div > div {
+    background: #0a0a14 !important;
+    border: 1.5px solid rgba(124,58,237,0.3) !important;
+    border-radius: 12px !important;
+    color: #e2e8f0 !important;
+    font-size: 0.95rem !important;
+    transition: border-color 0.2s ease;
+}
+.scan-input-card .stTextInput > div > div:focus-within {
+    border-color: #a78bfa !important;
+    box-shadow: 0 0 0 3px rgba(124,58,237,0.15) !important;
+}
+
+/* PR list cards */
+.pr-card {
+    background: linear-gradient(145deg, #12121f 0%, #0e0e1a 100%);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 14px; padding: 1.2rem 1.4rem;
+    margin-bottom: 0.8rem;
+    transition: all 0.25s cubic-bezier(.4,0,.2,1);
+    position: relative;
+}
+.pr-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(124,58,237,0.25);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+.pr-card .pr-title {
+    font-weight: 700; color: #e2e8f0; font-size: 0.95rem;
+    margin-bottom: 0.3rem;
+}
+.pr-card .pr-meta {
+    font-size: 0.78rem; color: #64748b;
+    display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center;
+}
+.pr-card .pr-meta span { display: inline-flex; align-items: center; gap: 3px; }
+.pr-card .pr-branch {
+    background: rgba(99,102,241,0.15); color: #a78bfa;
+    padding: 2px 10px; border-radius: 8px; font-size: 0.72rem;
+    font-weight: 600; font-family: 'Inter', monospace;
+}
+.pr-card .pr-stats {
+    font-size: 0.78rem; margin-top: 0.5rem;
+    display: flex; gap: 1rem;
+}
+.pr-card .pr-stats .add { color: #22c55e; }
+.pr-card .pr-stats .del { color: #ef4444; }
+.pr-card .pr-stats .files { color: #94a3b8; }
+
+/* Security shield on scan */
+.security-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.2);
+    padding: 4px 14px; border-radius: 20px;
+    font-size: 0.75rem; font-weight: 600; color: #22c55e;
+}
+
+/* Rate limit warning */
+.rate-limit-info {
+    background: rgba(234,179,8,0.08); border: 1px solid rgba(234,179,8,0.2);
+    border-radius: 12px; padding: 0.8rem 1.2rem;
+    font-size: 0.82rem; color: #eab308;
+    display: flex; align-items: center; gap: 8px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -189,7 +274,7 @@ with st.sidebar:
     st.caption("Multi-Agent Code Review Platform")
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    view = st.radio("Navigation", ["🔴  Live Pipeline", "📋  Review History"], index=0, label_visibility="collapsed")
+    view = st.radio("Navigation", ["🔴  Live Pipeline", "🔍  Scan Repo", "📋  Review History"], index=0, label_visibility="collapsed")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -374,7 +459,15 @@ def _render_findings(findings_json):
                 unsafe_allow_html=True,
             )
             if f.get("source_tool") and agent == "security":
-                st.caption(f"🔧 `{f['source_tool']}` · Rule: `{f.get('rule_id','N/A')}`")
+                confirmed_by = f.get("confirmed_by")
+                if confirmed_by and len(confirmed_by) > 1:
+                    tools_str = ", ".join(
+                        f"{c.get('tool', '?')} ({c.get('rule', 'N/A')})"
+                        for c in confirmed_by
+                    )
+                    st.caption(f"🔧 Confirmed by: {tools_str}")
+                else:
+                    st.caption(f"🔧 `{f['source_tool']}` · Rule: `{f.get('rule_id','N/A')}`")
             if f.get("suggested_fix"):
                 with st.expander("💡 Suggested fix", expanded=False):
                     st.code(f["suggested_fix"][:500])
@@ -492,11 +585,314 @@ def render_history():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# VIEW C — SCAN REPOSITORY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# GitHub URL regex (mirrors the Pydantic validator on the backend)
+_GITHUB_URL_RE = re.compile(
+    r"^https://github\.com/"
+    r"(?P<owner>[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,37}[a-zA-Z0-9])?)/"
+    r"(?P<repo>[a-zA-Z0-9._-]{1,100}?)(?:\.git)?/?$"
+)
+
+_BLOCKED_NAMES = {".", "..", "_", "-", "login", "settings", "api", "graphql", "raw"}
+_DANGEROUS_CHARS = [";", "&&", "|", "`", "$(", "${", "<", ">", "\n", "\r"]
+
+# ── Client-side rate limit state ───────────────────────────────────────────────
+
+def _init_rate_state():
+    """Initialize session-state rate limiting counters."""
+    if "scan_timestamps" not in st.session_state:
+        st.session_state.scan_timestamps = []       # list of epoch floats
+    if "trigger_timestamps" not in st.session_state:
+        st.session_state.trigger_timestamps = []
+
+
+def _check_client_rate(timestamps: list, max_hits: int, window_secs: int) -> tuple:
+    """Client-side sliding-window rate check. Returns (allowed, seconds_until_next)."""
+    now = _time.time()
+    timestamps[:] = [t for t in timestamps if now - t < window_secs]
+    if len(timestamps) >= max_hits:
+        oldest = min(timestamps)
+        wait = window_secs - (now - oldest)
+        return False, max(0, int(wait))
+    return True, 0
+
+
+def _record_hit(timestamps: list):
+    timestamps.append(_time.time())
+
+
+def _validate_github_url(url: str) -> tuple:
+    """Client-side validation mirroring the backend Pydantic model.
+
+    Returns (is_valid, error_message, owner, repo).
+    """
+    url = url.strip()
+    if not url:
+        return False, "Please enter a GitHub repository URL.", "", ""
+
+    if "%" in url or "\\" in url:
+        return False, "❌ URL must not contain encoded or escaped characters.", "", ""
+
+    for ch in _DANGEROUS_CHARS:
+        if ch in url:
+            return False, "❌ URL contains illegal characters.", "", ""
+
+    if len(url) > 250:
+        return False, "❌ URL is too long (max 250 characters).", "", ""
+
+    match = _GITHUB_URL_RE.match(url)
+    if not match:
+        return False, "❌ Invalid format. Use: `https://github.com/owner/repo`", "", ""
+
+    owner = match.group("owner")
+    repo = match.group("repo")
+
+    if owner.lower() in _BLOCKED_NAMES or repo.lower() in _BLOCKED_NAMES:
+        return False, "❌ Repository owner or name is invalid.", "", ""
+
+    return True, "", owner, repo
+
+
+def render_scan_repo():
+    """Render the Scan Repository view with URL input, PR listing, and pipeline trigger."""
+    _init_rate_state()
+
+    st.markdown(
+        '<div class="hero">'
+        '<h1>🔍 Scan Repository</h1>'
+        '<p>Enter a GitHub repo URL to discover open PRs and run the security pipeline</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # ── Security info strip ────────────────────────────────────────────────
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;gap:0.8rem;margin-bottom:1.5rem;">'
+        '<span class="security-badge">🔒 HTTPS Only</span>'
+        '<span class="security-badge">✅ Pydantic Validated</span>'
+        '<span class="security-badge">🛡️ Rate Limited</span>'
+        '<span class="security-badge">🚫 Injection Protected</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # ── URL Input ──────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="scan-input-card">'
+        '<h3>📎 GitHub Repository URL</h3>'
+        '<p>Only <code>https://github.com/owner/repo</code> format is accepted. '
+        'No query strings, fragments, or encoded characters.</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    github_url = st.text_input(
+        "GitHub Repository URL",
+        placeholder="https://github.com/owner/repo",
+        label_visibility="collapsed",
+        key="scan_repo_url_input",
+    )
+
+    # Live validation feedback
+    if github_url:
+        valid, err_msg, owner, repo = _validate_github_url(github_url)
+        if valid:
+            st.success(f"✅ Valid repository: **{owner}/{repo}**")
+        else:
+            st.error(err_msg)
+
+    st.markdown("")
+
+    # ── Fetch PRs Button ───────────────────────────────────────────────────
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        fetch_clicked = st.button("🔍 Fetch Open PRs", type="primary", use_container_width=True)
+    with col_info:
+        allowed, wait = _check_client_rate(st.session_state.scan_timestamps, 5, 60)
+        if not allowed:
+            st.markdown(
+                f'<div class="rate-limit-info">⏳ Rate limited — try again in {wait}s</div>',
+                unsafe_allow_html=True,
+            )
+
+    if fetch_clicked:
+        if not github_url:
+            st.warning("Please enter a GitHub repository URL.")
+            return
+
+        valid, err_msg, owner, repo = _validate_github_url(github_url)
+        if not valid:
+            st.error(err_msg)
+            return
+
+        # Client-side rate check
+        allowed, wait = _check_client_rate(st.session_state.scan_timestamps, 5, 60)
+        if not allowed:
+            st.error(f"⏳ Too many requests. Please wait {wait} seconds.")
+            return
+
+        _record_hit(st.session_state.scan_timestamps)
+
+        # Call the backend API
+        api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+        with st.spinner("Fetching open pull requests..."):
+            try:
+                resp = httpx.post(
+                    f"{api_base}/api/scan-repo",
+                    json={"github_url": github_url.strip()},
+                    timeout=30,
+                )
+
+                if resp.status_code == 429:
+                    st.error("🚫 Server rate limit reached. Please wait and try again.")
+                    return
+
+                if resp.status_code == 422:
+                    detail = resp.json().get("detail", "Validation failed")
+                    st.error(f"❌ {detail}")
+                    return
+
+                if resp.status_code >= 400:
+                    detail = resp.json().get("detail", "Unknown error")
+                    st.error(f"❌ Error ({resp.status_code}): {detail}")
+                    return
+
+                data = resp.json()
+                st.session_state.scan_result = data
+                st.session_state.scan_url = github_url.strip()
+
+            except httpx.ConnectError:
+                st.error("❌ Cannot connect to the API server. Ensure it's running on port 8000.")
+                return
+            except Exception as e:
+                st.error(f"❌ Request failed: {e}")
+                return
+
+    # ── Display PR Results ─────────────────────────────────────────────────
+    if "scan_result" in st.session_state and st.session_state.get("scan_url") == github_url.strip():
+        data = st.session_state.scan_result
+        prs = data.get("open_prs", [])
+        repo_name = data.get("repo_full_name", "")
+
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        st.markdown(f"### 📂 Open Pull Requests — `{repo_name}`")
+        st.caption(f"{len(prs)} open PR(s) found")
+
+        if not prs:
+            st.info("👋 No open pull requests found in this repository.")
+            return
+
+        for pr in prs:
+            pr_num = pr.get("number", 0)
+            pr_title = pr.get("title", "Untitled")
+            pr_author = pr.get("author", "unknown")
+            pr_branch = pr.get("head_branch", "?")
+            pr_base = pr.get("base_branch", "main")
+            pr_url = pr.get("html_url", "")
+            additions = pr.get("additions", 0)
+            deletions = pr.get("deletions", 0)
+            changed = pr.get("changed_files", 0)
+            updated = pr.get("updated_at", "")
+
+            if updated:
+                try:
+                    dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                    updated_str = dt.strftime("%b %d, %H:%M")
+                except Exception:
+                    updated_str = updated[:16]
+            else:
+                updated_str = "?"
+
+            # PR card with HTML
+            st.markdown(f"""
+            <div class="pr-card">
+                <div class="pr-title">#{pr_num} · {pr_title}</div>
+                <div class="pr-meta">
+                    <span>👤 {pr_author}</span>
+                    <span class="pr-branch">{pr_branch} → {pr_base}</span>
+                    <span>🕐 {updated_str}</span>
+                </div>
+                <div class="pr-stats">
+                    <span class="add">+{additions}</span>
+                    <span class="del">-{deletions}</span>
+                    <span class="files">📄 {changed} file{'s' if changed != 1 else ''}</span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Action buttons for each PR
+            btn_col1, btn_col2 = st.columns([1, 3])
+            with btn_col1:
+                btn_key = f"trigger_pr_{repo_name}_{pr_num}"
+                if st.button(f"⚡ Scan PR #{pr_num}", key=btn_key, use_container_width=True):
+                    # Client-side rate check for triggers (stricter)
+                    allowed, wait = _check_client_rate(
+                        st.session_state.trigger_timestamps, 2, 120
+                    )
+                    if not allowed:
+                        st.error(f"⏳ Scan trigger rate limited. Wait {wait}s.")
+                    else:
+                        _record_hit(st.session_state.trigger_timestamps)
+                        _trigger_pipeline_scan(github_url.strip(), pr_num, pr_title)
+
+            with btn_col2:
+                if pr_url:
+                    st.link_button(f"View on GitHub ↗", pr_url)
+
+            st.markdown("")
+
+
+def _trigger_pipeline_scan(github_url: str, pr_number: int, pr_title: str):
+    """Call the backend /api/trigger-scan endpoint."""
+    api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+    with st.spinner(f"Triggering security pipeline for PR #{pr_number}..."):
+        try:
+            resp = httpx.post(
+                f"{api_base}/api/trigger-scan",
+                json={"github_url": github_url, "pr_number": pr_number},
+                timeout=30,
+            )
+
+            if resp.status_code == 429:
+                st.error("🚫 Server rate limit reached. Please wait before triggering another scan.")
+                return
+
+            if resp.status_code == 404:
+                st.error(f"❌ PR #{pr_number} not found.")
+                return
+
+            if resp.status_code == 422:
+                detail = resp.json().get("detail", "Validation failed")
+                st.error(f"❌ {detail}")
+                return
+
+            if resp.status_code >= 400:
+                detail = resp.json().get("detail", "Unknown error")
+                st.error(f"❌ Error ({resp.status_code}): {detail}")
+                return
+
+            st.success(
+                f"🚀 **Pipeline triggered!** Scanning PR #{pr_number}: *{pr_title}*\n\n"
+                f"Switch to **🔴 Live Pipeline** view to watch agents in real-time."
+            )
+
+        except httpx.ConnectError:
+            st.error("❌ Cannot connect to the API server. Ensure it's running.")
+        except Exception as e:
+            st.error(f"❌ Request failed: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if "Live" in view:
     render_live_monitor()
+elif "Scan" in view:
+    render_scan_repo()
 else:
     render_history()
 

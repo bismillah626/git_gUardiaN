@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 
 TRIAGE_SYSTEM_PROMPT = """You are a senior security engineer triaging static analysis findings.
 You will be given a list of findings from security tools (Bandit, Semgrep, Gitleaks, ESLint).
+Findings have already been deduplicated — if multiple tools flagged the same issue, they
+have been merged into a single entry with a `confirmed_by` list showing all tools that agreed.
 
 Your job is to:
 1. Explain each finding in plain English — what the vulnerability is and why it matters.
 2. Assess whether each finding is a true positive or likely false positive based on context.
 3. Assign a severity: critical, high, medium, low, or info.
 4. Suggest a fix if possible.
+5. If a finding has multiple entries in `confirmed_by`, note that it was confirmed by
+   multiple independent tools (this increases confidence it's a true positive).
 
 SEVERITY RULES (you must follow these minimums):
 - Hardcoded credentials, API keys, passwords, tokens → CRITICAL (minimum)
@@ -42,6 +46,7 @@ CRITICAL RULES:
 - You must ONLY triage the findings given to you. Do NOT invent new findings.
 - Every finding in your response must reference the original tool and rule_id.
 - If you believe a finding is a false positive, mark severity as "info" and explain why.
+- Preserve the `confirmed_by` list exactly as provided — do not drop tool entries.
 
 Respond in JSON format as a list of objects:
 [
@@ -52,7 +57,8 @@ Respond in JSON format as a list of objects:
     "line": line_number,
     "severity": "critical|high|medium|low|info",
     "message": "Plain English explanation of what's wrong and why it matters",
-    "suggested_fix": "How to fix it (or null if unclear)"
+    "suggested_fix": "How to fix it (or null if unclear)",
+    "confirmed_by": [{"tool": "tool_name", "rule": "rule_id"}, ...]
   }
 ]
 """
@@ -93,6 +99,151 @@ _DANGEROUS_BANDIT_IDS = {
 
 # Keywords in messages that indicate credential exposure
 _CREDENTIAL_KEYWORDS = {"password", "secret", "api_key", "api-key", "apikey", "token", "credential"}
+
+
+# ── Vulnerability Category Map (for cross-tool deduplication) ─────────────────
+# Maps tool-specific rule IDs to shared vulnerability categories.
+# When two tools flag the same file/line and their rule IDs map to the same
+# category, we merge them into a single finding instead of reporting duplicates.
+# Extend this dict as new overlaps are observed — unmapped IDs fall back to
+# being their own category, so single-tool findings are never broken.
+
+VULN_CATEGORY_MAP = {
+    # Weak/broken hash used for passwords
+    "B303": "weak_hash",
+    "B324": "weak_hash_password",
+    "python.lang.security.audit.md5-used-as-password.md5-used-as-password": "weak_hash_password",
+    "python.lang.security.audit.insecure-hash-algorithms.insecure-hash-algorithm-md5": "weak_hash",
+    "python.lang.security.audit.insecure-hash-algorithms.insecure-hash-algorithm-sha1": "weak_hash",
+
+    # Shell injection via subprocess shell=True
+    "B602": "shell_injection",
+    "python.lang.security.audit.subprocess-shell-true.subprocess-shell-true": "shell_injection",
+
+    # Insecure deserialization (pickle)
+    "B301": "insecure_deserialization",
+    "python.lang.security.deserialization.pickle.avoid-pickle": "insecure_deserialization",
+    "python.lang.security.deserialization.avoid-pickle.avoid-pickle": "insecure_deserialization",
+
+    # SQL injection via string concatenation/formatting
+    "B608": "sql_injection",
+    "python.lang.security.audit.formatted-sql-query.formatted-sql-query": "sql_injection",
+    "python.lang.security.audit.string-concat-in-sql-query.string-concat-in-sql-query": "sql_injection",
+
+    # eval / exec usage
+    "B307": "eval_usage",
+    "B102": "exec_usage",
+    "python.lang.security.audit.eval-detected.eval-detected": "eval_usage",
+    "python.lang.security.audit.exec-detected.exec-detected": "exec_usage",
+
+    # Hardcoded passwords
+    "B105": "hardcoded_password",
+    "B106": "hardcoded_password",
+    "B107": "hardcoded_password",
+    "python.lang.security.audit.hardcoded-password.hardcoded-password": "hardcoded_password",
+
+    # os.system usage
+    "B605": "os_system",
+    "python.lang.security.audit.dangerous-system-call.dangerous-system-call": "os_system",
+
+    # YAML unsafe load
+    "B506": "yaml_unsafe_load",
+    "python.lang.security.deserialization.avoid-unsafe-yaml.avoid-unsafe-yaml": "yaml_unsafe_load",
+
+    # Binding to all interfaces
+    "B104": "bind_all_interfaces",
+
+    # Insecure TLS/SSL
+    "B502": "insecure_ssl",
+    "B503": "insecure_ssl",
+}
+
+# Severity ranking for merging — lower number = higher severity
+_SEVERITY_RANK = {
+    "critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4,
+}
+
+
+def deduplicate_findings(raw_findings: List[Dict]) -> List[Dict]:
+    """Deduplicate overlapping findings across security tools.
+
+    Groups findings by (file, line, normalized_vulnerability_category).
+    When multiple tools flag the same issue, merges into a single finding that:
+    - Keeps the most detailed message
+    - Uses the highest (most severe) severity
+    - Records all contributing tools in a `confirmed_by` list
+
+    Findings with rule IDs not in VULN_CATEGORY_MAP are left as-is — the
+    fallback category is the rule_id itself, so unmapped findings never
+    accidentally merge with unrelated findings.
+    """
+    from collections import defaultdict
+
+    groups: dict[tuple, List[Dict]] = defaultdict(list)
+
+    for finding in raw_findings:
+        file_path = finding.get("file", "unknown")
+        line = finding.get("line", 0)
+        rule_id = finding.get("rule_id", "")
+        # Normalize to a vulnerability category; fall back to rule_id itself
+        category = VULN_CATEGORY_MAP.get(rule_id, rule_id)
+        key = (file_path, line, category)
+        groups[key].append(finding)
+
+    deduped: List[Dict] = []
+
+    for (file_path, line, category), group in groups.items():
+        if len(group) == 1:
+            # Single finding — pass through with confirmed_by for consistency
+            f = dict(group[0])  # shallow copy
+            f["confirmed_by"] = [{"tool": f.get("tool", ""), "rule": f.get("rule_id", "")}]
+            deduped.append(f)
+        else:
+            # Multiple tools found the same issue — merge
+            confirmed_by = [
+                {"tool": f.get("tool", ""), "rule": f.get("rule_id", "")}
+                for f in group
+            ]
+
+            # Pick highest severity
+            best_sev = min(
+                group,
+                key=lambda f: _SEVERITY_RANK.get(f.get("severity", "medium"), 3),
+            )
+            merged_severity = best_sev.get("severity", "medium")
+
+            # Pick the longest/most detailed message
+            best_msg = max(group, key=lambda f: len(f.get("message", "")))
+            merged_message = best_msg.get("message", "")
+
+            # Pick the best suggested fix (longest)
+            fixes = [f.get("code", "") for f in group if f.get("code")]
+            merged_code = max(fixes, key=len) if fixes else ""
+
+            # Use the primary tool (first in the group) as source_tool
+            primary = group[0]
+            merged = {
+                "tool": primary.get("tool", ""),
+                "rule_id": primary.get("rule_id", ""),
+                "file": file_path,
+                "line": line,
+                "severity": merged_severity,
+                "message": merged_message,
+                "code": merged_code,
+                "confirmed_by": confirmed_by,
+            }
+            deduped.append(merged)
+
+            tools_str = ", ".join(f"{c['tool']}({c['rule']})" for c in confirmed_by)
+            logger.info(
+                f"[SECURITY-AGENT] Deduped: {file_path}:{line} [{category}] — "
+                f"merged {len(group)} findings from: {tools_str}"
+            )
+
+    logger.info(
+        f"[SECURITY-AGENT] Deduplication: {len(raw_findings)} raw → {len(deduped)} unique findings"
+    )
+    return deduped
 
 
 async def run_security_agent(
@@ -198,9 +349,14 @@ async def run_security_agent(
                 execution_time_seconds=time.time() - start_time,
             )
 
+        # ── Step 1.5: Deduplicate cross-tool overlaps ───────────────────
+        # Must happen BEFORE LLM triage so the model doesn't see/explain
+        # the same vulnerability twice. Also saves tokens.
+        deduped_findings = deduplicate_findings(all_tool_findings)
+
         # ── Step 2: LLM triage (batched per file to save tokens) ────────
         findings_by_file: Dict[str, List[Dict]] = {}
-        for f in all_tool_findings:
+        for f in deduped_findings:
             fname = f.get("file", "unknown")
             findings_by_file.setdefault(fname, []).append(f)
 
@@ -208,9 +364,12 @@ async def run_security_agent(
 
         for filename, file_findings in findings_by_file.items():
             prompt = (
-                f"Triage the following {len(file_findings)} security findings for file `{filename}`.\n\n"
+                f"Triage the following {len(file_findings)} security findings for file `{filename}`.\n"
+                f"Findings have been deduplicated across tools. If a finding has multiple entries in "
+                f"`confirmed_by`, it was independently flagged by multiple scanners — treat this as "
+                f"higher confidence that it is a true positive.\n\n"
                 f"Raw tool output:\n```json\n{json.dumps(file_findings, indent=2)}\n```\n\n"
-                "Respond with a JSON list of triaged findings."
+                "Respond with a JSON list of triaged findings. Preserve the `confirmed_by` list."
             )
 
             try:
@@ -219,7 +378,7 @@ async def run_security_agent(
                     system_prompt=TRIAGE_SYSTEM_PROMPT,
                 )
 
-                # Parse LLM response
+                # Parse LLM response, passing file_findings so confirmed_by is preserved
                 parsed = _parse_llm_findings(response, file_findings)
                 triaged_findings.extend(parsed)
 
@@ -228,7 +387,7 @@ async def run_security_agent(
                 # Fall back to raw findings without LLM explanation
                 for raw in file_findings:
                     triaged_findings.append(Finding(
-                        source_tool=raw["tool"],
+                        source_tool=raw.get("tool", "unknown"),
                         agent="security",
                         file=raw.get("file", filename),
                         line=raw.get("line", 0),
@@ -236,6 +395,7 @@ async def run_security_agent(
                         message=raw.get("message", "Security issue detected"),
                         rule_id=raw.get("rule_id"),
                         context=raw.get("code"),
+                        confirmed_by=raw.get("confirmed_by"),
                     ))
 
         # ── Step 3: Validate — reject any finding without tool source ───
@@ -278,8 +438,21 @@ def _parse_llm_findings(
 ) -> List[Finding]:
     """Parse the LLM's triaged JSON response into Finding objects.
     
+    Preserves `confirmed_by` from the deduplicated input. If the LLM
+    doesn't return it, we recover it from the original findings via a
+    lookup index keyed on (file, line, rule_id).
+    
     Falls back to raw findings if parsing fails.
     """
+    # Build a lookup index to recover confirmed_by if LLM drops it
+    _confirmed_by_index: Dict[tuple, list] = {}
+    for f in original_findings:
+        key = (f.get("file", ""), f.get("line", 0), f.get("rule_id", ""))
+        _confirmed_by_index[key] = f.get("confirmed_by")
+        # Also index by (file, line, tool) for looser matching
+        tool_key = (f.get("file", ""), f.get("line", 0), f.get("tool", ""))
+        _confirmed_by_index[tool_key] = f.get("confirmed_by")
+
     try:
         # Extract JSON from response (handle markdown code blocks)
         text = llm_response.strip()
@@ -294,6 +467,15 @@ def _parse_llm_findings(
 
         findings = []
         for item in parsed:
+            # Try to get confirmed_by from LLM response first, then fall back to index
+            confirmed_by = item.get("confirmed_by")
+            if not confirmed_by:
+                key = (item.get("file", ""), item.get("line", 0), item.get("rule_id", ""))
+                confirmed_by = _confirmed_by_index.get(key)
+            if not confirmed_by:
+                tool_key = (item.get("file", ""), item.get("line", 0), item.get("source_tool", ""))
+                confirmed_by = _confirmed_by_index.get(tool_key)
+
             findings.append(Finding(
                 source_tool=item.get("source_tool", "unknown"),
                 agent="security",
@@ -303,6 +485,7 @@ def _parse_llm_findings(
                 message=item.get("message", ""),
                 suggested_fix=item.get("suggested_fix"),
                 rule_id=item.get("rule_id"),
+                confirmed_by=confirmed_by,
             ))
         return findings
 
@@ -311,7 +494,7 @@ def _parse_llm_findings(
         # Return raw findings as fallback
         return [
             Finding(
-                source_tool=f["tool"],
+                source_tool=f.get("tool", "unknown"),
                 agent="security",
                 file=f.get("file", ""),
                 line=f.get("line", 0),
@@ -319,6 +502,7 @@ def _parse_llm_findings(
                 message=f.get("message", ""),
                 rule_id=f.get("rule_id"),
                 context=f.get("code"),
+                confirmed_by=f.get("confirmed_by"),
             )
             for f in original_findings
         ]

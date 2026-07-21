@@ -433,8 +433,19 @@ def _build_pr_comment(
             if f.get("standard_citation"):
                 lines.append(f"  > 📋 Standard: _{f['standard_citation']}_")
             
-            if f.get("source_tool") and f.get("agent") == "security":
-                lines.append(f"  > 🔧 Tool: `{f['source_tool']}` | Rule: `{f.get('rule_id', 'N/A')}`")
+            # Multi-tool confirmation display for security findings
+            confirmed_by = f.get("confirmed_by")
+            if f.get("agent") == "security":
+                if confirmed_by and len(confirmed_by) > 1:
+                    # Multiple tools confirmed the same vulnerability
+                    tools_str = ", ".join(
+                        f"`{c.get('tool', '?')}` ({c.get('rule', 'N/A')})"
+                        for c in confirmed_by
+                    )
+                    lines.append(f"  > 🔧 Confirmed by: {tools_str}")
+                elif f.get("source_tool"):
+                    # Single tool — keep existing format
+                    lines.append(f"  > 🔧 Tool: `{f['source_tool']}` | Rule: `{f.get('rule_id', 'N/A')}`")
             
             if f.get("suggested_fix"):
                 fix_preview = f["suggested_fix"][:200]
