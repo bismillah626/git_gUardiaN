@@ -7,6 +7,7 @@ Views:
   C) Scan Repository — enter a GitHub URL, list PRs, trigger pipeline
 """
 
+import html
 import json, os, sys, logging, time as _time, re
 from datetime import datetime, timedelta
 
@@ -21,6 +22,8 @@ from app.core.database import (
     get_all_reviews, get_reviews_by_repo, init_db, SessionLocal,
     ReviewRecordDB, AgentRunStatusDB,
     get_agent_statuses, get_latest_in_progress_review, get_review_by_id,
+    get_all_registered_repos, get_registered_repo, add_registered_repo,
+    remove_registered_repo, decrypt_secret,
 )
 
 logger = logging.getLogger(__name__)
@@ -257,6 +260,38 @@ section[data-testid="stSidebar"] .stMarkdown h1 {
     font-size: 0.82rem; color: #eab308;
     display: flex; align-items: center; gap: 8px;
 }
+
+/* ── Responsive layout additions ────────────────────── */
+.summary-strip span { word-break: break-word; overflow-wrap: anywhere; }
+.agent-grid {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1rem;
+}
+.history-metrics-grid {
+    display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 0.5rem;
+}
+.history-metric {
+    flex: 1 1 calc(20% - 1rem); min-width: 150px;
+    background: linear-gradient(145deg, #12121f, #0e0e1a);
+    border: 1px solid rgba(255,255,255,0.06); border-radius: 14px;
+    padding: 1rem 1.2rem; transition: all 0.2s ease;
+}
+.history-metric:hover {
+    border-color: rgba(124,58,237,0.25); transform: translateY(-2px);
+}
+.history-metric .label { color: #94a3b8; font-size: 0.82rem; }
+.history-metric .value { color: #e2e8f0; font-size: 1.75rem; font-weight: 700; }
+
+@media (max-width: 1100px) {
+    .agent-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .agent-card { min-height: auto; }
+    .history-metric { flex-basis: calc(33.333% - 1rem); }
+}
+@media (max-width: 700px) {
+    .agent-grid { grid-template-columns: 1fr; }
+    .agent-card { min-height: auto; }
+    .history-metric { flex-basis: calc(50% - 1rem); min-width: 130px; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -285,12 +320,23 @@ with st.sidebar:
         all_reviews = []
 
     repos = sorted(set(r.repo_full_name for r in all_reviews)) if all_reviews else []
+    try:
+        registered_repos = get_all_registered_repos()
+    except Exception as e:
+        st.error(f"Repo settings DB: {e}")
+        registered_repos = []
+    registered_repo_names = [str(r.repo_full_name) for r in registered_repos]
+    repo_count = len(set(repos) | set(registered_repo_names))
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("Reviews", len(all_reviews))
-    with c2:
-        st.metric("Repos", len(repos))
+    st.markdown(
+        '<div style="display:flex;gap:1rem;margin:0.5rem 0;">'
+        '<div><span style="color:#94a3b8;font-size:0.75rem;">Reviews</span><br/>'
+        f'<span style="color:#e2e8f0;font-weight:700;font-size:1.3rem;">{len(all_reviews)}</span></div>'
+        '<div><span style="color:#94a3b8;font-size:0.75rem;">Repos</span><br/>'
+        f'<span style="color:#e2e8f0;font-weight:700;font-size:1.3rem;">{repo_count}</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -317,12 +363,33 @@ def _agent_card_html(agent_name, status_row):
     </div>"""
 
 
+def _repo_filter_choices():
+    """Build registered-first repository choices and their canonical values."""
+    configured = list(registered_repo_names)
+    reviewed_only = [repo for repo in repos if repo not in set(configured)]
+    labels = ["All repositories"]
+    labels.extend(f"⭐ {repo}" for repo in configured)
+    labels.extend(reviewed_only)
+    values: dict[str, str | None] = {"All repositories": None}
+    values.update({f"⭐ {repo}": repo for repo in configured})
+    values.update({repo: repo for repo in reviewed_only})
+    return labels, values
+
+
 def render_live_monitor():
     st.markdown('<div class="hero"><h1>🔴 Live Pipeline Monitor</h1><p>Watch agents analyze your PR in real-time</p></div>', unsafe_allow_html=True)
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
+    filter_labels, filter_values = _repo_filter_choices()
+    repo_label = st.selectbox(
+        "📁 Repository", filter_labels, index=0, key="live_repo_filter"
+    )
+    selected_repo = filter_values[repo_label]
+
     in_progress = get_latest_in_progress_review()
     recent = get_all_reviews(limit=20)
+    if selected_repo:
+        recent = [r for r in recent if r.repo_full_name == selected_repo]
     opts = []
     for r in recent:
         lbl = f"#{r.id} — {r.repo_full_name} PR #{r.pr_number}"
@@ -375,10 +442,8 @@ def render_live_monitor():
     st.markdown("")
 
     # Agent cards
-    cols = st.columns(4, gap="medium")
-    for i, a in enumerate(agents):
-        with cols[i]:
-            st.markdown(_agent_card_html(a, smap.get(a)), unsafe_allow_html=True)
+    cards_html = "".join(_agent_card_html(a, smap.get(a)) for a in agents)
+    st.markdown(f'<div class="agent-grid">{cards_html}</div>', unsafe_allow_html=True)
 
     # Completion summary
     if not is_running and statuses and review.total_findings is not None:
@@ -415,7 +480,7 @@ def render_live_monitor():
 def _get_autofix_state(repo, branch):
     try:
         from app.core.github_client import GitHubClient
-        gh = GitHubClient()
+        gh = GitHubClient(_get_registered_pat(repo))
         r = gh.get_repo(repo)
         pulls = r.get_pulls(state="all", head=f"{repo.split('/')[0]}:{branch}")
         for pr in pulls:
@@ -477,8 +542,15 @@ def render_history():
     st.markdown('<div class="hero"><h1>📋 Review History</h1><p>Browse past reviews, track code health, and monitor branches</p></div>', unsafe_allow_html=True)
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    repo_filter = st.selectbox("📁 Repository", ["All"] + repos, index=0)
-    reviews = [r for r in all_reviews if repo_filter == "All" or r.repo_full_name == repo_filter]
+    filter_labels, filter_values = _repo_filter_choices()
+    repo_label = st.selectbox(
+        "📁 Repository", filter_labels, index=0, key="history_repo_filter"
+    )
+    repo_filter = filter_values[repo_label]
+    reviews = [
+        r for r in all_reviews
+        if repo_filter is None or r.repo_full_name == repo_filter
+    ]
 
     if not reviews:
         st.info("👋 **No reviews yet.** Trigger a PR review to see data here.")
@@ -490,12 +562,24 @@ def render_history():
     avg_h = sum(r.code_health_score for r in reviews) / len(reviews)
     avg_d = sum(r.review_duration_seconds for r in reviews) / len(reviews)
 
-    m = st.columns(5, gap="medium")
-    m[0].metric("Reviews", len(reviews))
-    m[1].metric("Findings", total_f)
-    m[2].metric("🔴 Critical", total_c)
-    m[3].metric("Avg Health", f"{avg_h:.0f}/100")
-    m[4].metric("Avg Time", f"{avg_d:.1f}s")
+    metric_values = [
+        ("Reviews", len(reviews)),
+        ("Findings", total_f),
+        ("🔴 Critical", total_c),
+        ("Avg Health", f"{avg_h:.0f}/100"),
+        ("Avg Time", f"{avg_d:.1f}s"),
+    ]
+    metrics_html = "".join(
+        '<div class="history-metric">'
+        f'<div class="label">{label}</div>'
+        f'<div class="value">{value}</div>'
+        '</div>'
+        for label, value in metric_values
+    )
+    st.markdown(
+        f'<div class="history-metrics-grid">{metrics_html}</div>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -561,14 +645,16 @@ def render_history():
         ts = r.created_at.strftime('%b %d, %H:%M') if r.created_at else '?'
 
         with st.expander(f"{he} **{r.repo_full_name}** #{r.pr_number}{title} · {r.code_health_score:.0f}/100 · {r.total_findings} findings{branch} · {ts}"):
-            dc = st.columns(7, gap="small")
-            dc[0].metric("🔴 Critical", r.critical_count)
-            dc[1].metric("🟠 High", r.high_count)
-            dc[2].metric("🟡 Medium", r.medium_count)
-            dc[3].metric("🔵 Low", r.low_count)
-            dc[4].metric("⚪ Info", r.info_count)
-            dc[5].metric("⏱ Duration", f"{r.review_duration_seconds:.1f}s")
-            with dc[6]:
+            severity_cols = st.columns(4, gap="small")
+            severity_cols[0].metric("🔴 Critical", r.critical_count)
+            severity_cols[1].metric("🟠 High", r.high_count)
+            severity_cols[2].metric("🟡 Medium", r.medium_count)
+            severity_cols[3].metric("🔵 Low", r.low_count)
+
+            detail_cols = st.columns(3, gap="small")
+            detail_cols[0].metric("⚪ Info", r.info_count)
+            detail_cols[1].metric("⏱ Duration", f"{r.review_duration_seconds:.1f}s")
+            with detail_cols[2]:
                 if r.pr_url:
                     st.link_button("View PR ↗", r.pr_url)
                 st.caption(f"`{r.commit_sha[:8] if r.commit_sha else '?'}`")
@@ -655,6 +741,111 @@ def _validate_github_url(url: str) -> tuple:
     return True, "", owner, repo
 
 
+def _get_registered_pat(repo_full_name: str):
+    """Load a registered PAT into a short-lived local value only."""
+    try:
+        record = get_registered_repo(repo_full_name)
+        encrypted_pat = getattr(record, "pat_token", None) if record else None
+        return decrypt_secret(str(encrypted_pat)) if encrypted_pat else None
+    except Exception as e:
+        logger.warning("Could not load registered credentials for %s: %s", repo_full_name, e)
+        return None
+
+
+def _render_repo_settings():
+    """Render repository registration and confirmed removal controls."""
+    global registered_repos, registered_repo_names
+
+    with st.sidebar:
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        with st.expander("⚙️ Repo Settings", expanded=False):
+            notice = st.session_state.pop("repo_settings_notice", None)
+            if notice:
+                st.success(notice)
+
+            with st.form("add_registered_repo", clear_on_submit=True):
+                repo_input = st.text_input(
+                    "GitHub Repo", placeholder="owner/repo", max_chars=200
+                )
+                pat_token = st.text_input(
+                    "Personal Access Token", type="password", max_chars=500
+                )
+                webhook_secret = st.text_input(
+                    "Webhook Secret (optional)", type="password", max_chars=500
+                )
+                add_clicked = st.form_submit_button(
+                    "Add Repository", use_container_width=True
+                )
+
+            if add_clicked:
+                valid, err_msg, owner, repo = _validate_github_url(
+                    f"https://github.com/{repo_input.strip()}"
+                )
+                if not valid:
+                    st.error(err_msg.replace("URL", "repository"))
+                elif not pat_token:
+                    st.error("❌ Personal Access Token is required.")
+                else:
+                    try:
+                        repo_full_name = f"{owner}/{repo}"
+                        add_registered_repo(
+                            repo_full_name, pat_token, webhook_secret or None
+                        )
+                        registered_repos = get_all_registered_repos()
+                        registered_repo_names = [
+                            str(item.repo_full_name) for item in registered_repos
+                        ]
+                        st.success(f"✅ Registered **{repo_full_name}**.")
+                    except Exception as e:
+                        st.error(f"Could not register repository: {e}")
+
+            st.markdown("#### Registered repositories")
+            if not registered_repos:
+                st.caption("No repositories registered yet.")
+
+            pending_remove = st.session_state.get("repo_remove_pending")
+            for registered in registered_repos:
+                repo_name = str(registered.repo_full_name)
+                has_pat = bool(getattr(registered, "pat_token", None))
+                has_webhook = bool(getattr(registered, "webhook_secret", None))
+                indicators = (
+                    ("✅" if has_pat else "")
+                    + (" 🔗" if has_webhook else "")
+                )
+                row_label, row_button = st.columns([3, 1], gap="small")
+                with row_label:
+                    st.markdown(f"`{repo_name}` {indicators}")
+                with row_button:
+                    if st.button(
+                        "Remove", key=f"remove_repo_{registered.id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.repo_remove_pending = repo_name
+                        st.rerun()
+
+                if pending_remove == repo_name:
+                    st.warning(f"Remove **{repo_name}** and its stored credentials?")
+                    confirm_col, cancel_col = st.columns(2, gap="small")
+                    with confirm_col:
+                        if st.button(
+                            "Confirm", key=f"confirm_remove_{registered.id}",
+                            type="primary", use_container_width=True,
+                        ):
+                            if remove_registered_repo(repo_name):
+                                st.session_state.repo_settings_notice = (
+                                    f"Removed {repo_name}."
+                                )
+                            st.session_state.pop("repo_remove_pending", None)
+                            st.rerun()
+                    with cancel_col:
+                        if st.button(
+                            "Cancel", key=f"cancel_remove_{registered.id}",
+                            use_container_width=True,
+                        ):
+                            st.session_state.pop("repo_remove_pending", None)
+                            st.rerun()
+
+
 def render_scan_repo():
     """Render the Scan Repository view with URL input, PR listing, and pipeline trigger."""
     _init_rate_state()
@@ -680,6 +871,21 @@ def render_scan_repo():
     )
 
     # ── URL Input ──────────────────────────────────────────────────────────
+    if registered_repo_names:
+        registered_selection = st.selectbox(
+            "📁 Registered Repos",
+            ["Select a registered repository"] + registered_repo_names,
+            index=0,
+            key="scan_registered_repo_select",
+        )
+        if registered_selection != "Select a registered repository":
+            applied_repo = st.session_state.get("scan_registered_repo_applied")
+            if applied_repo != registered_selection:
+                st.session_state.scan_repo_url_input = (
+                    f"https://github.com/{registered_selection}"
+                )
+                st.session_state.scan_registered_repo_applied = registered_selection
+
     st.markdown(
         '<div class="scan-input-card">'
         '<h3>📎 GitHub Repository URL</h3>'
@@ -738,11 +944,15 @@ def render_scan_repo():
 
         # Call the backend API
         api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+        repo_full_name = f"{owner}/{repo}"
+        pat_token = _get_registered_pat(repo_full_name)
+        request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
         with st.spinner("Fetching open pull requests..."):
             try:
                 resp = httpx.post(
                     f"{api_base}/api/scan-repo",
                     json={"github_url": github_url.strip()},
+                    headers=request_headers,
                     timeout=30,
                 )
 
@@ -806,14 +1016,19 @@ def render_scan_repo():
             else:
                 updated_str = "?"
 
-            # PR card with HTML
+            # PR card with responsive HTML actions
+            safe_title = html.escape(str(pr_title))
+            safe_author = html.escape(str(pr_author))
+            safe_branch = html.escape(str(pr_branch))
+            safe_base = html.escape(str(pr_base))
+            safe_updated = html.escape(str(updated_str))
             st.markdown(f"""
             <div class="pr-card">
-                <div class="pr-title">#{pr_num} · {pr_title}</div>
+                <div class="pr-title">#{pr_num} · {safe_title}</div>
                 <div class="pr-meta">
-                    <span>👤 {pr_author}</span>
-                    <span class="pr-branch">{pr_branch} → {pr_base}</span>
-                    <span>🕐 {updated_str}</span>
+                    <span>👤 {safe_author}</span>
+                    <span class="pr-branch">{safe_branch} → {safe_base}</span>
+                    <span>🕐 {safe_updated}</span>
                 </div>
                 <div class="pr-stats">
                     <span class="add">+{additions}</span>
@@ -823,12 +1038,13 @@ def render_scan_repo():
             </div>
             """, unsafe_allow_html=True)
 
-            # Action buttons for each PR
-            btn_col1, btn_col2 = st.columns([1, 3])
-            with btn_col1:
+            # Native horizontal containers use flexbox and wrap on narrow screens.
+            action_key = re.sub(r"[^a-zA-Z0-9_-]", "_", f"{repo_name}_{pr_num}")
+            with st.container(
+                key=f"pr_actions_{action_key}", horizontal=True, gap="small"
+            ):
                 btn_key = f"trigger_pr_{repo_name}_{pr_num}"
-                if st.button(f"⚡ Scan PR #{pr_num}", key=btn_key, use_container_width=True):
-                    # Client-side rate check for triggers (stricter)
+                if st.button(f"⚡ Scan PR #{pr_num}", key=btn_key):
                     allowed, wait = _check_client_rate(
                         st.session_state.trigger_timestamps, 2, 120
                     )
@@ -836,23 +1052,31 @@ def render_scan_repo():
                         st.error(f"⏳ Scan trigger rate limited. Wait {wait}s.")
                     else:
                         _record_hit(st.session_state.trigger_timestamps)
-                        _trigger_pipeline_scan(github_url.strip(), pr_num, pr_title)
-
-            with btn_col2:
+                        _trigger_pipeline_scan(
+                            github_url.strip(), pr_num, pr_title,
+                            _get_registered_pat(repo_name),
+                        )
                 if pr_url:
                     st.link_button(f"View on GitHub ↗", pr_url)
 
             st.markdown("")
 
 
-def _trigger_pipeline_scan(github_url: str, pr_number: int, pr_title: str):
+def _trigger_pipeline_scan(
+    github_url: str,
+    pr_number: int,
+    pr_title: str,
+    pat_token: str | None = None,
+):
     """Call the backend /api/trigger-scan endpoint."""
     api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
     with st.spinner(f"Triggering security pipeline for PR #{pr_number}..."):
         try:
+            request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
             resp = httpx.post(
                 f"{api_base}/api/trigger-scan",
                 json={"github_url": github_url, "pr_number": pr_number},
+                headers=request_headers,
                 timeout=30,
             )
 
@@ -888,6 +1112,8 @@ def _trigger_pipeline_scan(github_url: str, pr_number: int, pr_title: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 # ROUTER
 # ═══════════════════════════════════════════════════════════════════════════════
+
+_render_repo_settings()
 
 if "Live" in view:
     render_live_monitor()

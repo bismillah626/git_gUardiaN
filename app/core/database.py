@@ -5,13 +5,18 @@ Uses SQLAlchemy 2.0 style with psycopg2 (sync) for Streamlit dashboard
 and general operations.
 """
 
+import base64
 import json
+import os
+import warnings
 from datetime import datetime
 from typing import Optional, List
 
+from cryptography.fernet import Fernet, InvalidToken
+
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, DateTime, Text,
-    ForeignKey, Enum as SAEnum,
+    ForeignKey, Enum as SAEnum, func,
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 
@@ -55,6 +60,18 @@ class ReviewRecordDB(Base):
     agent_statuses = relationship("AgentRunStatusDB", back_populates="review", cascade="all, delete-orphan")
 
 
+class RegisteredRepoDB(Base):
+    """Repository credentials configured through the dashboard."""
+    __tablename__ = "registered_repos"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_full_name = Column(String(200), unique=True, nullable=False)
+    pat_token = Column(Text, nullable=True)
+    webhook_secret = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class AgentRunStatusDB(Base):
     """Tracks per-agent status during an in-progress review."""
     __tablename__ = "agent_run_status"
@@ -71,6 +88,61 @@ class AgentRunStatusDB(Base):
 
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
+
+_FERNET_PREFIX = "fernet:"
+_BASE64_PREFIX = "base64:"
+_encryption_key = os.getenv("DASHBOARD_ENCRYPTION_KEY", "").strip()
+_fernet = None
+
+if _encryption_key:
+    try:
+        _fernet = Fernet(_encryption_key.encode("utf-8"))
+    except (ValueError, TypeError):
+        warnings.warn(
+            "DASHBOARD_ENCRYPTION_KEY is invalid; repository secrets will use "
+            "development-only base64 obfuscation.",
+            RuntimeWarning,
+        )
+else:
+    warnings.warn(
+        "DASHBOARD_ENCRYPTION_KEY is not set; repository secrets will use "
+        "development-only base64 obfuscation. Configure a Fernet key in production.",
+        RuntimeWarning,
+    )
+
+
+def _encrypt_secret(value: Optional[str]) -> Optional[str]:
+    """Encrypt a secret, with non-blocking obfuscation for local development."""
+    if not value:
+        return None
+    raw = value.encode("utf-8")
+    if _fernet:
+        return _FERNET_PREFIX + _fernet.encrypt(raw).decode("utf-8")
+    return _BASE64_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def decrypt_secret(value: Optional[str]) -> Optional[str]:
+    """Decrypt a stored repository secret without persisting the plaintext."""
+    if not value:
+        return None
+    try:
+        if value.startswith(_FERNET_PREFIX):
+            if not _fernet:
+                warnings.warn(
+                    "A repository secret is Fernet-encrypted but "
+                    "DASHBOARD_ENCRYPTION_KEY is unavailable.",
+                    RuntimeWarning,
+                )
+                return None
+            token = value[len(_FERNET_PREFIX):].encode("utf-8")
+            return _fernet.decrypt(token).decode("utf-8")
+        if value.startswith(_BASE64_PREFIX):
+            token = value[len(_BASE64_PREFIX):].encode("ascii")
+            return base64.urlsafe_b64decode(token).decode("utf-8")
+    except (InvalidToken, ValueError, UnicodeDecodeError):
+        warnings.warn("A stored repository secret could not be decrypted.", RuntimeWarning)
+    return None
+
 
 def init_db():
     """Create all tables if they don't exist."""
@@ -109,6 +181,77 @@ def get_all_reviews(limit: int = 100) -> list:
             .limit(limit)
             .all()
         )
+    finally:
+        db.close()
+
+
+def get_all_registered_repos() -> List[RegisteredRepoDB]:
+    """Fetch all dashboard-registered repositories without decrypting secrets."""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(RegisteredRepoDB)
+            .order_by(RegisteredRepoDB.repo_full_name.asc())
+            .all()
+        )
+    finally:
+        db.close()
+
+
+def get_registered_repo(repo_full_name: str) -> Optional[RegisteredRepoDB]:
+    """Fetch a registered repository by its canonical owner/name."""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(RegisteredRepoDB)
+            .filter(RegisteredRepoDB.repo_full_name == repo_full_name)
+            .first()
+        )
+    finally:
+        db.close()
+
+
+def add_registered_repo(
+    repo_full_name: str,
+    pat_token: Optional[str],
+    webhook_secret: Optional[str],
+) -> RegisteredRepoDB:
+    """Create or update a registered repository with encrypted credentials."""
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(RegisteredRepoDB)
+            .filter(RegisteredRepoDB.repo_full_name == repo_full_name)
+            .first()
+        )
+        if record is None:
+            record = RegisteredRepoDB(repo_full_name=repo_full_name)
+            db.add(record)
+
+        record.pat_token = _encrypt_secret(pat_token)
+        record.webhook_secret = _encrypt_secret(webhook_secret)
+        record.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(record)
+        return record
+    finally:
+        db.close()
+
+
+def remove_registered_repo(repo_full_name: str) -> bool:
+    """Delete a registered repository and return whether it existed."""
+    db = SessionLocal()
+    try:
+        record = (
+            db.query(RegisteredRepoDB)
+            .filter(RegisteredRepoDB.repo_full_name == repo_full_name)
+            .first()
+        )
+        if record is None:
+            return False
+        db.delete(record)
+        db.commit()
+        return True
     finally:
         db.close()
 

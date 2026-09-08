@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.database import init_db, save_review, finalize_review_record
-from app.core.github_client import GitHubClient
+from app.core.github_client import GitHubClient, github_token_context
 from app.models.schemas import (
     PRWebhookPayload, Severity,
     ScanRepoRequest, ScanRepoResponse, TriggerPRScanRequest,
@@ -212,10 +212,11 @@ async def scan_repo_for_prs(request: Request):
         raise HTTPException(status_code=422, detail=f"Invalid request: {e}")
 
     repo_full_name = scan_req.repo_full_name
+    github_token = request.headers.get("X-GitHub-Token") or None
 
     # Fetch open PRs from GitHub
     try:
-        gh = GitHubClient()
+        gh = GitHubClient(github_token)
         repo = gh.get_repo(repo_full_name)
         pulls = repo.get_pulls(state="open", sort="updated", direction="desc")
 
@@ -291,10 +292,11 @@ async def trigger_pr_scan(request: Request, background_tasks: BackgroundTasks):
 
     repo_full_name = f"{match.group(1)}/{match.group(2)}"
     pr_number = trigger_req.pr_number
+    github_token = request.headers.get("X-GitHub-Token") or None
 
     # Verify PR actually exists before queuing expensive work
     try:
-        gh = GitHubClient()
+        gh = GitHubClient(github_token)
         pr = gh.get_pr(repo_full_name, pr_number)
     except Exception as e:
         raise HTTPException(
@@ -315,7 +317,7 @@ async def trigger_pr_scan(request: Request, background_tasks: BackgroundTasks):
         sender="dashboard",
     )
 
-    background_tasks.add_task(run_review_pipeline, webhook_payload)
+    background_tasks.add_task(run_review_pipeline, webhook_payload, github_token)
 
     return JSONResponse(
         content={
@@ -431,7 +433,10 @@ async def manual_review(
 
 # ─── Review Pipeline ──────────────────────────────────────────────────────────
 
-async def run_review_pipeline(payload: PRWebhookPayload):
+async def run_review_pipeline(
+    payload: PRWebhookPayload,
+    github_token: Optional[str] = None,
+):
     """Execute the full Git Guardian review pipeline.
     
     1. Fetch PR diff/files from GitHub
@@ -440,9 +445,11 @@ async def run_review_pipeline(payload: PRWebhookPayload):
     4. Save results to Postgres
     """
     start_time = time.time()
+    token_context = github_token_context(github_token)
+    token_context.__enter__()
     
     try:
-        gh = GitHubClient()
+        gh = GitHubClient(github_token)
         
         # Fetch changed files
         changed_files = gh.get_pr_files(payload.repo_full_name, payload.pr_number)
@@ -461,7 +468,9 @@ async def run_review_pipeline(payload: PRWebhookPayload):
                 payload.pr_title = pr.title
         
         # Clone repo for security scanning (must clone the PR's branch)
-        repo_clone_path = _clone_repo(payload.repo_full_name, head_sha, head_branch)
+        repo_clone_path = _clone_repo(
+            payload.repo_full_name, head_sha, head_branch, github_token
+        )
         
         # Build the LangGraph review state
         initial_state = {
@@ -518,6 +527,8 @@ async def run_review_pipeline(payload: PRWebhookPayload):
             )
         except Exception:
             pass
+    finally:
+        token_context.__exit__(None, None, None)
 
 
 # ─── Helper Functions ──────────────────────────────────────────────────────────
@@ -534,20 +545,44 @@ def _verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
+def _clone_repo(
+    repo_full_name: str,
+    sha: str,
+    branch: str = "",
+    github_token: Optional[str] = None,
+) -> str:
     """Clone a repo to a temporary directory for scanning.
     
     Clones the specific branch (if provided) so PR files are available.
     Falls back to default branch + SHA checkout if branch is not specified.
     """
     clone_dir = tempfile.mkdtemp(prefix="git_guardian_")
-    
-    # Use token for private repos
-    if settings.github_token:
-        clone_url = f"https://{settings.github_token}@github.com/{repo_full_name}.git"
-    else:
-        clone_url = f"https://github.com/{repo_full_name}.git"
-    
+    clone_url = f"https://github.com/{repo_full_name}.git"
+    token = github_token or settings.github_token
+    askpass_path = None
+    clone_env = None
+
+    if token:
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix="git_guardian_askpass_", delete=False
+        ) as askpass:
+            askpass.write(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  *Username*) printf '%s\\n' \"$GIT_USERNAME\" ;;\n"
+                "  *) printf '%s\\n' \"$GIT_PASSWORD\" ;;\n"
+                "esac\n"
+            )
+            askpass_path = askpass.name
+        os.chmod(askpass_path, 0o700)
+        clone_env = os.environ.copy()
+        clone_env.update({
+            "GIT_ASKPASS": askpass_path,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_USERNAME": "x-access-token",
+            "GIT_PASSWORD": token,
+        })
+
     try:
         # Clone the specific branch if available (critical for PR file access)
         clone_cmd = ["git", "clone", "--depth", "1"]
@@ -555,10 +590,11 @@ def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
             clone_cmd.extend(["--branch", branch])
         clone_cmd.extend([clone_url, clone_dir])
         
-        result = subprocess.run(
+        subprocess.run(
             clone_cmd,
             capture_output=True, text=True, timeout=120,
             check=True,
+            env=clone_env,
         )
         logger.info(f"Cloned {repo_full_name} (branch={branch or 'default'}) to {clone_dir}")
         
@@ -566,6 +602,12 @@ def _clone_repo(repo_full_name: str, sha: str, branch: str = "") -> str:
     except Exception as e:
         logger.warning(f"Repo clone failed: {e}")
         return clone_dir
+    finally:
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except OSError:
+                pass
 
 
 def _save_review_to_db(payload: PRWebhookPayload, state: dict, elapsed: float):

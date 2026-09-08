@@ -32,6 +32,10 @@ services:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-}
       - DATABASE_URL=postgresql+psycopg2://git_guardian:git_guardian@localhost:5432/git_guardian
       - DATABASE_URL_ASYNC=postgresql+asyncpg://git_guardian:git_guardian@localhost:5432/git_guardian
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,6 +49,8 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg2://git_guardian:git_guardian@localhost:5432/git_guardian
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      - DASHBOARD_ENCRYPTION_KEY=${DASHBOARD_ENCRYPTION_KEY:-}
     command: ["streamlit", "run", "app/dashboard/app.py", "--server.port", "8501", "--server.headless", "true"]
     depends_on:
       postgres:

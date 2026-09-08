@@ -6,6 +6,8 @@ creating branches, and committing auto-fix files.
 """
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional, List, Dict
 
 from github import Github, GithubException
@@ -15,13 +17,26 @@ from github.Repository import Repository
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+_request_github_token: ContextVar[Optional[str]] = ContextVar(
+    "request_github_token", default=None
+)
+
+
+@contextmanager
+def github_token_context(token: Optional[str]):
+    """Make a request-scoped token available to pipeline GitHub clients."""
+    context_token = _request_github_token.set(token)
+    try:
+        yield
+    finally:
+        _request_github_token.reset(context_token)
 
 
 class GitHubClient:
     """Wrapper around PyGithub for all GitHub operations."""
 
     def __init__(self, token: Optional[str] = None):
-        self._token = token or settings.github_token
+        self._token = token or _request_github_token.get() or settings.github_token
         if not self._token:
             raise ValueError("GITHUB_TOKEN is required. Set it in .env or environment.")
         self._gh = Github(self._token)
