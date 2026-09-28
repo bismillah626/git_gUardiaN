@@ -8,7 +8,6 @@ services:
     dockerCommand: /bin/sh -c 'uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-10000}"'
     healthCheckPath: /health
     autoDeployTrigger: commit
-    maxShutdownDelaySeconds: 300
     envVars:
       - fromGroup: git-guardian-shared
       - key: DATABASE_URL
