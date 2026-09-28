@@ -24,7 +24,16 @@ from app.core.config import settings
 
 # ─── Engine & Session ──────────────────────────────────────────────────────────
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+def _sync_database_url(database_url: str) -> str:
+    """Select the installed psycopg2 driver for provider-issued Postgres URLs."""
+    if database_url.startswith("postgresql://"):
+        return database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    if database_url.startswith("postgres://"):
+        return database_url.replace("postgres://", "postgresql+psycopg2://", 1)
+    return database_url
+
+
+engine = create_engine(_sync_database_url(settings.database_url), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 Base = declarative_base()
