@@ -1,0 +1,72 @@
+services:
+  - type: web
+    name: git-guardian-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: /bin/sh -c 'uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-10000}"'
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - fromGroup: git-guardian-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: git-guardian-db
+          property: connectionString
+      - key: CHROMA_PERSIST_DIR
+        value: /tmp/chroma_data
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_WEBHOOK_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_PROJECT
+        value: git-guardian-ai
+
+  - type: web
+    name: git-guardian-dashboard
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: /bin/sh -c 'streamlit run app/dashboard/app.py --server.address 0.0.0.0 --server.port "${PORT:-10000}" --server.headless true'
+    healthCheckPath: /_stcore/health
+    autoDeployTrigger: commit
+    envVars:
+      - fromGroup: git-guardian-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: git-guardian-db
+          property: connectionString
+      - key: API_BASE_URL
+        fromService:
+          name: git-guardian-api
+          type: web
+          property: hostport
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+databases:
+  - name: git-guardian-db
+    plan: free
+    databaseName: git_guardian
+    user: git_guardian
+    postgresMajorVersion: "16"
+    ipAllowList: []
+
+envVarGroups:
+  - name: git-guardian-shared
+    envVars:
+      - key: DASHBOARD_ENCRYPTION_KEY
+        generateValue: true

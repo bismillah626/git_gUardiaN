@@ -297,6 +297,14 @@ section[data-testid="stSidebar"] .stMarkdown h1 {
 
 # ─── Init ──────────────────────────────────────────────────────────────────────
 
+def _api_base_url():
+    """Return the API URL for local or private-service deployments."""
+    api_base = os.getenv("API_BASE_URL", "http://localhost:8000").strip()
+    if "://" not in api_base:
+        api_base = f"http://{api_base}"
+    return api_base.rstrip("/")
+
+
 try:
     init_db()
 except Exception:
@@ -943,7 +951,7 @@ def render_scan_repo():
         _record_hit(st.session_state.scan_timestamps)
 
         # Call the backend API
-        api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+        api_base = _api_base_url()
         repo_full_name = f"{owner}/{repo}"
         pat_token = _get_registered_pat(repo_full_name)
         request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
@@ -1069,7 +1077,7 @@ def _trigger_pipeline_scan(
     pat_token: str | None = None,
 ):
     """Call the backend /api/trigger-scan endpoint."""
-    api_base = os.getenv("API_BASE_URL", "http://localhost:8000")
+    api_base = _api_base_url()
     with st.spinner(f"Triggering security pipeline for PR #{pr_number}..."):
         try:
             request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
