@@ -955,13 +955,14 @@ def render_scan_repo():
         repo_full_name = f"{owner}/{repo}"
         pat_token = _get_registered_pat(repo_full_name)
         request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
+        request_timeout = 90 if os.getenv("RENDER") else 30
         with st.spinner("Fetching open pull requests..."):
             try:
                 resp = httpx.post(
                     f"{api_base}/api/scan-repo",
                     json={"github_url": github_url.strip()},
                     headers=request_headers,
-                    timeout=30,
+                    timeout=request_timeout,
                 )
 
                 if resp.status_code == 429:
@@ -983,7 +984,7 @@ def render_scan_repo():
                 st.session_state.scan_url = github_url.strip()
 
             except httpx.ConnectError:
-                st.error("❌ Cannot connect to the API server. Ensure it's running on port 8000.")
+                st.error(f"❌ Cannot connect to the API service at `{api_base}`.")
                 return
             except Exception as e:
                 st.error(f"❌ Request failed: {e}")
@@ -1078,6 +1079,7 @@ def _trigger_pipeline_scan(
 ):
     """Call the backend /api/trigger-scan endpoint."""
     api_base = _api_base_url()
+    request_timeout = 90 if os.getenv("RENDER") else 30
     with st.spinner(f"Triggering security pipeline for PR #{pr_number}..."):
         try:
             request_headers = {"X-GitHub-Token": pat_token} if pat_token else {}
@@ -1085,7 +1087,7 @@ def _trigger_pipeline_scan(
                 f"{api_base}/api/trigger-scan",
                 json={"github_url": github_url, "pr_number": pr_number},
                 headers=request_headers,
-                timeout=30,
+                timeout=request_timeout,
             )
 
             if resp.status_code == 429:
@@ -1112,7 +1114,7 @@ def _trigger_pipeline_scan(
             )
 
         except httpx.ConnectError:
-            st.error("❌ Cannot connect to the API server. Ensure it's running.")
+            st.error(f"❌ Cannot connect to the API service at `{api_base}`.")
         except Exception as e:
             st.error(f"❌ Request failed: {e}")
 

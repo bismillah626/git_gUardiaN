@@ -52,7 +52,7 @@ services:
         fromService:
           name: git-guardian-api
           type: web
-          property: hostport
+          envVarKey: RENDER_EXTERNAL_URL
       - key: PYTHONUNBUFFERED
         value: "1"
 
