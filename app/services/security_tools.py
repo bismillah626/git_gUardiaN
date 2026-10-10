@@ -16,7 +16,12 @@ import subprocess
 import tempfile
 from typing import List, Dict, Optional
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
+
+# Default timeout for security tools (can be overridden by settings)
+DEFAULT_SECURITY_TOOL_TIMEOUT = 300
 
 
 def check_tool_availability() -> Dict[str, bool]:
@@ -64,7 +69,7 @@ def run_bandit(target_path: str) -> List[Dict]:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=settings.security_tool_timeout,
         )
         
         # Bandit returns exit code 1 when findings exist (not an error)
@@ -127,7 +132,7 @@ def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=settings.security_tool_timeout,
         )
         
         if result.stderr:
@@ -195,7 +200,7 @@ def run_gitleaks(target_path: str) -> List[Dict]:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=settings.security_tool_timeout,
         )
         
         if result.stderr:
@@ -253,7 +258,7 @@ def run_eslint(target_path: str) -> List[Dict]:
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=settings.security_tool_timeout,
         )
         
         output = result.stdout

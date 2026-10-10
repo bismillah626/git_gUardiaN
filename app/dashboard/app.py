@@ -486,10 +486,11 @@ def render_live_monitor():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_autofix_state(repo, branch):
+    import asyncio
     try:
         from app.core.github_client import GitHubClient
         gh = GitHubClient(_get_registered_pat(repo))
-        r = gh.get_repo(repo)
+        r = asyncio.run(gh.get_repo(repo))
         pulls = r.get_pulls(state="all", head=f"{repo.split('/')[0]}:{branch}")
         for pr in pulls:
             if pr.merged: return "merged", pr.html_url

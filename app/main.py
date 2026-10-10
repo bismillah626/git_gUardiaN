@@ -217,7 +217,7 @@ async def scan_repo_for_prs(request: Request):
     # Fetch open PRs from GitHub
     try:
         gh = GitHubClient(github_token)
-        repo = gh.get_repo(repo_full_name)
+        repo = await gh.get_repo(repo_full_name)
         pulls = repo.get_pulls(state="open", sort="updated", direction="desc")
 
         open_prs = []
@@ -297,7 +297,7 @@ async def trigger_pr_scan(request: Request, background_tasks: BackgroundTasks):
     # Verify PR actually exists before queuing expensive work
     try:
         gh = GitHubClient(github_token)
-        pr = gh.get_pr(repo_full_name, pr_number)
+        pr = await gh.get_pr(repo_full_name, pr_number)
     except Exception as e:
         raise HTTPException(
             status_code=404,
@@ -433,6 +433,8 @@ async def manual_review(
 
 # ─── Review Pipeline ──────────────────────────────────────────────────────────
 
+from app.agents.supervisor import _acquire_review_slot, _release_review_slot
+
 async def run_review_pipeline(
     payload: PRWebhookPayload,
     github_token: Optional[str] = None,
@@ -444,6 +446,9 @@ async def run_review_pipeline(
     3. Run the LangGraph supervisor pipeline
     4. Save results to Postgres
     """
+    # Acquire review slot (limits concurrent reviews)
+    await _acquire_review_slot()
+    
     start_time = time.time()
     token_context = github_token_context(github_token)
     token_context.__enter__()
@@ -452,14 +457,14 @@ async def run_review_pipeline(
         gh = GitHubClient(github_token)
         
         # Fetch changed files
-        changed_files = gh.get_pr_files(payload.repo_full_name, payload.pr_number)
+        changed_files = await gh.get_pr_files(payload.repo_full_name, payload.pr_number)
         logger.info(f"PR has {len(changed_files)} changed files")
         
         # Get head SHA and branch if not provided (manual trigger)
         head_sha = payload.head_sha
         head_branch = payload.head_branch
         if not head_sha:
-            pr = gh.get_pr(payload.repo_full_name, payload.pr_number)
+            pr = await gh.get_pr(payload.repo_full_name, payload.pr_number)
             head_sha = pr.head.sha
             head_branch = pr.head.ref
             if not payload.pr_url:
@@ -520,7 +525,7 @@ async def run_review_pipeline(
         # Try to post an error comment on the PR
         try:
             gh = GitHubClient()
-            gh.post_pr_comment(
+            await gh.post_pr_comment(
                 payload.repo_full_name,
                 payload.pr_number,
                 f"⚠️ **Git Guardian AI** encountered an error during review:\n\n```\n{str(e)}\n```",
@@ -528,6 +533,7 @@ async def run_review_pipeline(
         except Exception:
             pass
     finally:
+        _release_review_slot()
         token_context.__exit__(None, None, None)
 
 

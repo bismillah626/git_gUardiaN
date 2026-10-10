@@ -2,10 +2,12 @@
 LLM Provider adapter for Git Guardian AI.
 
 Provides a unified interface for calling Groq (primary) and Claude (fallback)
-with built-in retry/backoff for rate-limit resilience.
+with built-in retry/backoff for rate-limit resilience and token-bucket rate limiting.
 """
 
+import asyncio
 import logging
+import time
 from typing import Optional, List
 
 from tenacity import (
@@ -22,16 +24,46 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+class TokenBucketRateLimiter:
+    """Token bucket rate limiter for LLM requests."""
+    
+    def __init__(self, requests_per_minute: int):
+        self.rate = requests_per_minute / 60.0  # requests per second
+        self.capacity = requests_per_minute
+        self.tokens = float(requests_per_minute)
+        self.last_update = time.monotonic()
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self) -> None:
+        """Acquire a token, waiting if necessary."""
+        async with self._lock:
+            while True:
+                now = time.monotonic()
+                elapsed = now - self.last_update
+                self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+                self.last_update = now
+                
+                if self.tokens >= 1.0:
+                    self.tokens -= 1.0
+                    return
+                
+                # Wait for next token
+                wait_time = (1.0 - self.tokens) / self.rate
+                await asyncio.sleep(wait_time)
+
+
 class LLMProvider:
     """Unified LLM interface with automatic retry and provider fallback.
     
     Primary: Groq (fast, free-tier)
     Fallback: Claude (trial credits) — only used if Groq is persistently rate-limited
     """
-
+    
     def __init__(self):
         self._groq = None
         self._claude = None
+        # Token bucket rate limiter for LLM requests
+        self._rate_limiter = TokenBucketRateLimiter(settings.llm_requests_per_minute)
 
     @property
     def groq(self) -> ChatGroq:
@@ -80,6 +112,9 @@ class LLMProvider:
         
         Tries Groq first. If rate-limited and use_fallback=True, tries Claude.
         """
+        # Rate limit
+        await self._rate_limiter.acquire()
+        
         messages = []
         if system_prompt:
             messages.append(SystemMessage(content=system_prompt))
