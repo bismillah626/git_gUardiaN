@@ -40,6 +40,20 @@ from app.agents.documentation_agent import run_documentation_agent
 logger = logging.getLogger(__name__)
 
 
+# ─── Concurrency Control ────────────────────────────────────────────────────────
+
+# Semaphore to limit concurrent reviews
+_review_semaphore = asyncio.Semaphore(settings.max_concurrent_reviews)
+
+async def _acquire_review_slot() -> None:
+    """Acquire a review slot, waiting if at capacity."""
+    await _review_semaphore.acquire()
+
+def _release_review_slot() -> None:
+    """Release a review slot."""
+    _review_semaphore.release()
+
+
 # ─── LangGraph State ───────────────────────────────────────────────────────────
 
 class ReviewState(TypedDict):
@@ -113,8 +127,20 @@ async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args,
     except Exception:
         pass  # Don't fail the agent if status tracking fails
 
+    # Per-agent timeouts (seconds) - up to 300s for larger repos
+    agent_timeouts = {
+        "security": settings.agent_timeout_seconds,  # Security tools can take longer
+        "quality": settings.agent_timeout_seconds,
+        "test_gap": settings.agent_timeout_seconds,
+        "documentation": settings.agent_timeout_seconds,
+    }
+    timeout = agent_timeouts.get(agent_name, settings.agent_timeout_seconds)
+
     try:
-        result = await agent_func(*args, **kwargs)
+        result = await asyncio.wait_for(
+            agent_func(*args, **kwargs),
+            timeout=timeout,
+        )
 
         findings_count = len(result.findings) if result and hasattr(result, "findings") else 0
         try:
@@ -129,12 +155,17 @@ async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args,
         return result
 
     except Exception as e:
+        error_message = (
+            f"Timed out after {timeout}s"
+            if isinstance(e, asyncio.TimeoutError)
+            else str(e)
+        )
         try:
             if review_id:
-                update_agent_status(review_id, agent_name, "failed", str(e)[:500])
+                update_agent_status(review_id, agent_name, "failed", error_message[:500])
         except Exception:
             pass
-        raise
+        raise RuntimeError(error_message) from e
 
 
 async def run_agents_parallel(state: ReviewState) -> dict:
@@ -245,7 +276,7 @@ async def post_review(state: ReviewState) -> dict:
         gh = GitHubClient()
         
         # Post the review comment
-        gh.post_pr_comment(
+        await gh.post_pr_comment(
             repo_full_name=state["repo_full_name"],
             pr_number=state["pr_number"],
             body=state["pr_comment"],
@@ -259,7 +290,7 @@ async def post_review(state: ReviewState) -> dict:
         if fixable:
             branch_name = f"{settings.auto_fix_branch_prefix}{state['pr_number']}"
             try:
-                gh.create_branch(
+                await gh.create_branch(
                     repo_full_name=state["repo_full_name"],
                     branch_name=branch_name,
                     source_sha=state["head_sha"],
@@ -280,7 +311,7 @@ async def post_review(state: ReviewState) -> dict:
                     f"**Review and merge manually** — Git Guardian never auto-merges.\n\n"
                     f"Files with fixes: {', '.join(fixes_by_file.keys())}"
                 )
-                gh.post_pr_comment(state["repo_full_name"], state["pr_number"], fix_comment)
+                await gh.post_pr_comment(state["repo_full_name"], state["pr_number"], fix_comment)
                 auto_fix_branch = branch_name
                 
             except Exception as e:
