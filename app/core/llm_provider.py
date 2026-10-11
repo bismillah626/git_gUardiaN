@@ -125,8 +125,10 @@ class LLMProvider:
             return response.content
         except Exception as e:
             error_str = str(e).lower()
-            if ("rate" in error_str or "429" in error_str) and use_fallback and self.claude:
-                logger.warning(f"Groq rate-limited, falling back to Claude: {e}")
+            # Fallback on rate limit OR model not found (404)
+            if (("rate" in error_str or "429" in error_str or "404" in error_str or "model" in error_str) 
+                and use_fallback and self.claude):
+                logger.warning(f"Groq error (rate limit or model not found), falling back to Claude: {e}")
                 response = await self.claude.ainvoke(messages)
                 return response.content
             raise  # Let tenacity retry

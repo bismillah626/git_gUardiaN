@@ -45,32 +45,32 @@ class Settings(BaseSettings):
     groq_max_retries: int = 5
     groq_retry_base_delay: float = 1.0  # seconds
     agent_timeout_seconds: int = Field(
-        default=300,
+        default=180,
         ge=30,
         description="Maximum runtime for one review agent before it is marked failed",
     )
     # LLM rate limiting (requests per minute)
     llm_requests_per_minute: int = Field(
-        default=30,
+        default=20,
         ge=1,
         description="Max LLM requests per minute (shared across all agents)",
     )
     # GitHub API rate limiting
     github_requests_per_minute: int = Field(
-        default=60,
+        default=40,
         ge=1,
         description="Max GitHub API requests per minute",
     )
     # Max concurrent reviews
     max_concurrent_reviews: int = Field(
-        default=2,
+        default=1,
         ge=1,
         description="Maximum number of concurrent review pipelines",
     )
     # Security tool timeouts (seconds)
     security_tool_timeout: int = Field(
-        default=300,
-        ge=30,
+        default=120,
+        ge=10,
         description="Timeout for individual security tools (bandit, semgrep, gitleaks)",
     )
 
