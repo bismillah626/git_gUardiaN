@@ -9,7 +9,6 @@ A validation step rejects any finding without a source_tool reference.
 """
 
 import asyncio
-import asyncio
 import json
 import logging
 import os

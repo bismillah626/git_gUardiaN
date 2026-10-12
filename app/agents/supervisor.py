@@ -93,24 +93,31 @@ class ReviewState(TypedDict):
 # ─── Graph Node Functions ─────────────────────────────────────────────────────
 
 async def prepare_review(state: ReviewState) -> dict:
-    """Prepare the review: create tracking record and queue agents."""
+    """Prepare the review: create tracking record and queue agents.
+    
+    If the pipeline already created the review record (for crash-safety),
+    reuse it instead of creating a duplicate.
+    """
     logger.info(f"Preparing review for {state['repo_full_name']}#{state['pr_number']}")
 
-    # Create a placeholder review record in the DB so the dashboard can see it
-    review_id = None
-    try:
-        review_id = create_review_placeholder(
-            repo_full_name=state["repo_full_name"],
-            pr_number=state["pr_number"],
-            head_sha=state.get("head_sha", ""),
-            head_branch=state.get("head_branch", ""),
-            pr_url=state.get("pr_url", ""),
-            pr_title=state.get("pr_title", ""),
-        )
-        init_agent_statuses(review_id)
-        logger.info(f"Created review placeholder #{review_id} with queued agent statuses")
-    except Exception as e:
-        logger.warning(f"Could not create review placeholder: {e}")
+    review_id = state.get("review_id")
+    if review_id:
+        logger.info(f"Reusing pre-created review placeholder #{review_id}")
+    else:
+        try:
+            review_id = await asyncio.to_thread(
+                create_review_placeholder,
+                repo_full_name=state["repo_full_name"],
+                pr_number=state["pr_number"],
+                head_sha=state.get("head_sha", ""),
+                head_branch=state.get("head_branch", ""),
+                pr_url=state.get("pr_url", ""),
+                pr_title=state.get("pr_title", ""),
+            )
+            await asyncio.to_thread(init_agent_statuses, review_id)
+            logger.info(f"Created review placeholder #{review_id} with queued agent statuses")
+        except Exception as e:
+            logger.warning(f"Could not create review placeholder: {e}")
 
     return {
         "start_time": time.time(),
@@ -123,7 +130,10 @@ async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args,
     """Wrapper that updates agent status before/after running a single agent."""
     try:
         if review_id:
-            update_agent_status(review_id, agent_name, "running", f"Running {agent_name} analysis...")
+            await asyncio.to_thread(
+                update_agent_status, review_id, agent_name, "running",
+                f"Running {agent_name} analysis...",
+            )
     except Exception:
         pass  # Don't fail the agent if status tracking fails
 
@@ -145,14 +155,28 @@ async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args,
         findings_count = len(result.findings) if result and hasattr(result, "findings") else 0
         try:
             if review_id:
-                update_agent_status(
-                    review_id, agent_name, "done",
+                await asyncio.to_thread(
+                    update_agent_status, review_id, agent_name, "done",
                     f"{findings_count} finding{'s' if findings_count != 1 else ''} detected",
                 )
         except Exception:
             pass
 
         return result
+
+    except asyncio.CancelledError:
+        # Pipeline-level timeout cancelled us — still record a terminal state
+        # so the dashboard never shows this agent as RUNNING forever.
+        # Use a direct sync DB call: awaiting here could re-raise CancelledError.
+        try:
+            if review_id:
+                update_agent_status(
+                    review_id, agent_name, "failed",
+                    "Cancelled — pipeline aborted",
+                )
+        except Exception:
+            pass
+        raise
 
     except Exception as e:
         error_message = (
@@ -162,7 +186,10 @@ async def _run_single_agent(agent_func, agent_key, agent_name, review_id, *args,
         )
         try:
             if review_id:
-                update_agent_status(review_id, agent_name, "failed", error_message[:500])
+                await asyncio.to_thread(
+                    update_agent_status, review_id, agent_name, "failed",
+                    error_message[:500],
+                )
         except Exception:
             pass
         raise RuntimeError(error_message) from e

@@ -21,7 +21,15 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.core.database import init_db, save_review, finalize_review_record
+from app.core.database import (
+    init_db,
+    save_review,
+    finalize_review_record,
+    create_review_placeholder,
+    init_agent_statuses,
+    fail_stale_reviews,
+    fail_review_agents,
+)
 from app.core.github_client import GitHubClient, github_token_context
 from app.models.schemas import (
     PRWebhookPayload, Severity,
@@ -53,6 +61,20 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
     except Exception as e:
         logger.warning(f"⚠️ Database init failed (will retry on first use): {e}")
+    
+    # Reconcile orphaned runs: any agent row still queued/running at boot
+    # belongs to a dead process (Render OOM kill, redeploy, crash). Without
+    # this, the dashboard shows those agents as RUNNING forever while this
+    # fresh process serves /health normally.
+    try:
+        reconciled = fail_stale_reviews()
+        if reconciled:
+            logger.warning(
+                f"⚠️ Reconciled {reconciled} orphaned agent run(s) left behind "
+                f"by a previous process — marked as failed"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Stale-run reconciliation failed: {e}")
     
     # Index coding standards into RAG
     try:
@@ -454,6 +476,8 @@ async def run_review_pipeline(
     token_context = github_token_context(github_token)
     token_context.__enter__()
     
+    review_id = None
+    repo_clone_path = None
     try:
         gh = GitHubClient(github_token)
         
@@ -472,6 +496,24 @@ async def run_review_pipeline(
                 payload.pr_url = pr.html_url
             if not payload.pr_title or payload.pr_title == "Manual review":
                 payload.pr_title = pr.title
+        
+        # Create the review record BEFORE running the graph so that if the
+        # pipeline crashes or the process dies, the dashboard shows a terminal
+        # state instead of agents stuck in "running" forever.
+        try:
+            review_id = await asyncio.to_thread(
+                create_review_placeholder,
+                repo_full_name=payload.repo_full_name,
+                pr_number=payload.pr_number,
+                head_sha=head_sha,
+                head_branch=head_branch or "",
+                pr_url=payload.pr_url or "",
+                pr_title=payload.pr_title or "",
+            )
+            await asyncio.to_thread(init_agent_statuses, review_id)
+            logger.info(f"Created review placeholder #{review_id} for live tracking")
+        except Exception as e:
+            logger.warning(f"Could not create review placeholder: {e}")
         
         # Clone repo for security scanning (must clone the PR's branch)
         repo_clone_path = await asyncio.to_thread(
@@ -499,7 +541,7 @@ async def run_review_pipeline(
             "auto_fix_branch": None,
             "start_time": start_time,
             "errors": [],
-            "review_id": None,
+            "review_id": review_id,
             "pr_url": payload.pr_url,
             "pr_title": payload.pr_title,
         }
@@ -507,7 +549,7 @@ async def run_review_pipeline(
         # Run the LangGraph pipeline with a hard overall timeout
         # (agents each have their own timeout, but this is the final safety net)
         review_graph = compile_review_graph()
-        pipeline_timeout = settings.agent_timeout_seconds + 60  # agent timeout + 60s buffer
+        pipeline_timeout = settings.pipeline_timeout_seconds
         try:
             final_state = await asyncio.wait_for(
                 review_graph.ainvoke(initial_state),
@@ -520,20 +562,23 @@ async def run_review_pipeline(
         
         # Save/finalize in database
         elapsed = time.time() - start_time
-        _save_review_to_db(payload, final_state, elapsed)
+        await asyncio.to_thread(_save_review_to_db, payload, final_state, elapsed)
         
         logger.info(
             f"✅ Review complete for {payload.repo_full_name}#{payload.pr_number} "
             f"in {elapsed:.1f}s — {len(final_state.get('all_findings', []))} findings"
         )
         
-        # Cleanup cloned repo
-        if repo_clone_path and os.path.exists(repo_clone_path):
-            import shutil
-            shutil.rmtree(repo_clone_path, ignore_errors=True)
-        
     except Exception as e:
         logger.error(f"❌ Review pipeline failed: {e}", exc_info=True)
+        # Make sure no agent row is left in a non-terminal state
+        if review_id:
+            try:
+                await asyncio.to_thread(
+                    fail_review_agents, review_id, f"Pipeline failed: {str(e)}"
+                )
+            except Exception:
+                pass
         # Try to post an error comment on the PR
         try:
             gh = GitHubClient()
@@ -545,6 +590,10 @@ async def run_review_pipeline(
         except Exception:
             pass
     finally:
+        # Cleanup cloned repo (also on the error path — Render disks are small)
+        if repo_clone_path and os.path.exists(repo_clone_path):
+            import shutil
+            shutil.rmtree(repo_clone_path, ignore_errors=True)
         _release_review_slot()
         token_context.__exit__(None, None, None)
 

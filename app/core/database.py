@@ -431,3 +431,67 @@ def get_review_by_id(review_id: int) -> Optional[ReviewRecordDB]:
         return db.query(ReviewRecordDB).filter_by(id=review_id).first()
     finally:
         db.close()
+
+
+def fail_stale_reviews(reason: str = "Interrupted by service restart") -> int:
+    """Mark all unfinished agent rows as failed.
+
+    Called on startup: any queued/running row at boot is orphaned, because the
+    process that owned it died mid-review (Render OOM kill, redeploy, crash).
+    Without this, the dashboard shows those agents as RUNNING forever while a
+    fresh process happily serves /health.
+
+    Returns the number of agent rows reconciled.
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        rows = (
+            db.query(AgentRunStatusDB)
+            .filter(AgentRunStatusDB.status.in_(["queued", "running"]))
+            .all()
+        )
+        affected_reviews = set()
+        for row in rows:
+            row.status = "failed"
+            row.status_message = reason[:512]
+            if row.completed_at is None:
+                row.completed_at = now
+            affected_reviews.add(row.review_id)
+
+        for rid in affected_reviews:
+            review = db.query(ReviewRecordDB).filter_by(id=rid).first()
+            if review and not review.review_summary:
+                review.review_summary = f"Review aborted: {reason}"
+
+        db.commit()
+        return len(rows)
+    finally:
+        db.close()
+
+
+def fail_review_agents(review_id: int, reason: str) -> None:
+    """Mark any queued/running agents of a specific review as failed.
+
+    Used when the pipeline crashes or times out so no agent row is left
+    in a non-terminal state.
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        rows = (
+            db.query(AgentRunStatusDB)
+            .filter(
+                AgentRunStatusDB.review_id == review_id,
+                AgentRunStatusDB.status.in_(["queued", "running"]),
+            )
+            .all()
+        )
+        for row in rows:
+            row.status = "failed"
+            row.status_message = reason[:512]
+            if row.completed_at is None:
+                row.completed_at = now
+        db.commit()
+    finally:
+        db.close()

@@ -6,6 +6,7 @@ Grounds all feedback via RAG over the team's coding-standards document,
 citing which specific standard was violated.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -63,7 +64,8 @@ async def run_quality_agent(
 
     try:
         # ── Step 1: Ensure coding standards are indexed ─────────────────
-        rag_service.index_coding_standards()
+        # ChromaDB is sync — run in a thread so the event loop stays responsive
+        await asyncio.to_thread(rag_service.index_coding_standards)
 
         all_findings: List[Finding] = []
 
@@ -98,7 +100,9 @@ async def run_quality_agent(
             # ── Step 3: Retrieve relevant standards ─────────────────────
             # Query standards based on the type of code being reviewed
             query = f"code quality standards for {', '.join(batch_filenames)}"
-            relevant_standards = rag_service.query_standards(query, n_results=3)
+            relevant_standards = await asyncio.to_thread(
+                rag_service.query_standards, query, n_results=3
+            )
 
             standards_context = "\n\n".join(
                 [s["document"] for s in relevant_standards]
