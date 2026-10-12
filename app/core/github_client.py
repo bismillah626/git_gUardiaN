@@ -37,20 +37,21 @@ class GitHubRateLimiter:
     
     async def acquire(self) -> None:
         """Acquire a token, waiting if necessary."""
-        async with self._lock:
-            while True:
+        while True:
+            async with self._lock:
                 now = time.monotonic()
                 elapsed = now - self.last_update
                 self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
                 self.last_update = now
-                
+
                 if self.tokens >= 1.0:
                     self.tokens -= 1.0
                     return
-                
-                # Wait for next token
+
                 wait_time = (1.0 - self.tokens) / self.rate
-                await asyncio.sleep(wait_time)
+
+            # Sleep OUTSIDE the lock so other coroutines can proceed
+            await asyncio.sleep(wait_time)
 
 
 def github_rate_limited(func: Callable) -> Callable:

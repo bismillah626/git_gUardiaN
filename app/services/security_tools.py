@@ -113,11 +113,12 @@ def run_bandit(target_path: str) -> List[Dict]:
         return []
 
 
-def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
+def run_semgrep(target_path: str, rules: Optional[str] = None) -> List[Dict]:
     """Run Semgrep security/quality scanner.
     
     Returns list of findings in standardized format.
     """
+    rules = rules or settings.semgrep_rules
     logger.info(f"[SECURITY-TOOLS] 🔍 SEMGREP EXECUTION STARTED on: {target_path} (rules={rules})")
     try:
         cmd = [
@@ -125,6 +126,11 @@ def run_semgrep(target_path: str, rules: str = "auto") -> List[Dict]:
             "--config", rules,
             "--json",
             "--quiet",
+            # Render free containers have ~512MB RAM — keep semgrep single-threaded,
+            # disable telemetry uploads, and cap per-file scan time.
+            "--metrics=off",
+            "--jobs=1",
+            "--timeout", str(max(10, settings.security_tool_timeout)),
             target_path,
         ]
         

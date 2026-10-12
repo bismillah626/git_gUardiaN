@@ -5,6 +5,7 @@ Webhook receiver for GitHub PR events. Validates signatures,
 parses payloads, and triggers the LangGraph review pipeline.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -473,7 +474,8 @@ async def run_review_pipeline(
                 payload.pr_title = pr.title
         
         # Clone repo for security scanning (must clone the PR's branch)
-        repo_clone_path = _clone_repo(
+        repo_clone_path = await asyncio.to_thread(
+            _clone_repo,
             payload.repo_full_name, head_sha, head_branch, github_token
         )
         
@@ -502,9 +504,19 @@ async def run_review_pipeline(
             "pr_title": payload.pr_title,
         }
         
-        # Run the LangGraph pipeline
+        # Run the LangGraph pipeline with a hard overall timeout
+        # (agents each have their own timeout, but this is the final safety net)
         review_graph = compile_review_graph()
-        final_state = await review_graph.ainvoke(initial_state)
+        pipeline_timeout = settings.agent_timeout_seconds + 60  # agent timeout + 60s buffer
+        try:
+            final_state = await asyncio.wait_for(
+                review_graph.ainvoke(initial_state),
+                timeout=pipeline_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Review pipeline exceeded hard timeout of {pipeline_timeout}s"
+            )
         
         # Save/finalize in database
         elapsed = time.time() - start_time

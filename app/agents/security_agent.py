@@ -8,6 +8,8 @@ Key constraint: Every finding must trace back to a tool output.
 A validation step rejects any finding without a source_tool reference.
 """
 
+import asyncio
+import asyncio
 import json
 import logging
 import os
@@ -293,21 +295,21 @@ async def run_security_agent(
                 elif filename.endswith((".js", ".jsx", ".ts", ".tsx")):
                     js_files_exist = True
 
-            # Run appropriate tools
+            # Run appropriate tools (in thread pool to avoid blocking the event loop)
             if python_files_exist:
                 logger.info("[SECURITY-AGENT] Python files detected — running Bandit + Semgrep")
-                bandit_results = run_bandit(tmpdir)
+                bandit_results = await asyncio.to_thread(run_bandit, tmpdir)
                 all_tool_findings.extend(bandit_results)
                 tools_executed.append(f"bandit({len(bandit_results)} findings)")
 
-                semgrep_results = run_semgrep(tmpdir)
+                semgrep_results = await asyncio.to_thread(run_semgrep, tmpdir)
                 all_tool_findings.extend(semgrep_results)
                 tools_executed.append(f"semgrep({len(semgrep_results)} findings)")
             else:
                 tools_skipped.extend(["bandit (no .py files)", "semgrep (no .py files)"])
 
             logger.info("[SECURITY-AGENT] Running Gitleaks on all changed files")
-            gitleaks_results = run_gitleaks(tmpdir)
+            gitleaks_results = await asyncio.to_thread(run_gitleaks, tmpdir)
             all_tool_findings.extend(gitleaks_results)
             tools_executed.append(f"gitleaks({len(gitleaks_results)} findings)")
 
@@ -319,7 +321,7 @@ async def run_security_agent(
                     if fn.endswith((".js", ".jsx", ".ts", ".tsx")):
                         fp = os.path.join(tmpdir, fn)
                         if os.path.exists(fp):
-                            eslint_results = run_eslint(fp)
+                            eslint_results = await asyncio.to_thread(run_eslint, fp)
                             all_tool_findings.extend(eslint_results)
                             eslint_count += len(eslint_results)
                 tools_executed.append(f"eslint({eslint_count} findings)")

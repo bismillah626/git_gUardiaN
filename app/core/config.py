@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # --- LLM Providers ---
     groq_api_key: str = Field(default="", description="Groq free-tier API key")
-    groq_model: str = Field(default="llama-3.3-70b-versatile", description="Default Groq chat model")
+    groq_model: str = Field(default="llama-3.1-70b-versatile", description="Default Groq chat model")
     groq_embeddings_model: str = Field(default="", description="Groq embeddings model (if available)")
 
     claude_api_key: str = Field(default="", description="Anthropic Claude API key (fallback)")
@@ -72,6 +72,17 @@ class Settings(BaseSettings):
         default=120,
         ge=10,
         description="Timeout for individual security tools (bandit, semgrep, gitleaks)",
+    )
+    # Semgrep rules config (auto downloads from registry — heavy on small containers)
+    semgrep_rules: str = Field(
+        default="auto",
+        description="Semgrep --config value. Use p/security-audit on low-memory hosts.",
+    )
+    # Hard cap for the entire review pipeline (all agents + aggregation + posting)
+    pipeline_timeout_seconds: int = Field(
+        default=900,
+        ge=60,
+        description="Maximum runtime for one full review pipeline before it is aborted",
     )
 
     # --- Security ---
